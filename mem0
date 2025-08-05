@@ -74,18 +74,19 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         """
         print(f"\n[Wrapper.similarity_search] Intercepted vector search with k={k}...")
         try:
-            # FIX: Call the parent's search method that returns documents and scores
-            results_with_scores = super().similarity_search_with_score_by_vector(
+            # FIX: Call the parent's search method that returns documents
+            results = super().similarity_search_by_vector(
                 embedding=embedding, k=k, **kwargs
             )
-            print(f"[Wrapper.similarity_search] Parent method returned {len(results_with_scores)} results.")
+            print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
 
             # Process results for debugging and return the documents
             final_documents = []
-            for doc, score in results_with_scores:
-                doc.metadata["score"] = score
+            for doc in results:
+                # Optionally, add a dummy score if needed for compatibility
+                doc.metadata["score"] = doc.metadata.get("score", None)
                 final_documents.append(doc)
-                print(f"  - Match (Score: {score:.4f}): {doc.page_content[:80]}...")
+                print(f"  - Match: {doc.page_content[:80]}...")
             
             return final_documents
         except Exception as e:
@@ -199,7 +200,7 @@ try:
     print(f"[Debug] Using container: {container.id}")
     results = container.query_items(
         query="SELECT * FROM c",
-        enable_scan_in_query=True,
+        enable_cross_partition_query=True,
         parameters=[],
     )
     docs = list(results)
