@@ -141,6 +141,11 @@ vector_store = CosmosDBMem0Wrapper(
     indexing_policy=indexing_policy,
     cosmos_container_properties={"partition_key": {"paths": ["/id"], "kind": "Hash"}},
     cosmos_database_properties={},
+    vector_search_fields={
+        "text_field": "text",
+        "embedding_field": "vectorContent",
+        "metadata_field": "metadata",
+    }
 )
 
 print("Vector store initialized successfully.")
