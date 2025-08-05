@@ -195,6 +195,23 @@ vector_store = CosmosDBMem0Wrapper(
 
 print("Vector store initialized successfully.")
 
+# --- Clean up all documents in the container before running ---
+print("Cleaning up all documents in the container before running...")
+container = vector_store._container
+# Query all documents (cross-partition)
+docs = list(container.query_items(
+    query="SELECT c.id FROM c",
+    enable_cross_partition_query=True
+))
+deleted_count = 0
+for doc in docs:
+    try:
+        container.delete_item(item=doc['id'], partition_key=doc['id'])
+        deleted_count += 1
+    except Exception as e:
+        print(f"Failed to delete document {doc['id']}: {e}")
+print(f"Deleted {deleted_count} documents from the container.")
+
 # --- Mem0 Config ---
 config = {
     "vector_store": {
