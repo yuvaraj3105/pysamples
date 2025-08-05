@@ -31,15 +31,23 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize container reference
-        self._container = None
+        self._mem0_container = None
 
     @property
     def container(self):
         """Get the container reference, initializing if needed."""
-        if self._container is None:
-            database = self.cosmos_client.get_database_client(self.database_name)
-            self._container = database.get_container_client(self.container_name)
-        return self._container
+        if self._mem0_container is None:
+            try:
+                # Access the protected attributes from parent class
+                database = self._cosmos_client.get_database_client(self._database_name)
+                self._mem0_container = database.get_container_client(self._container_name)
+                print(f"[Debug] Successfully initialized container: {self._container_name}")
+            except Exception as e:
+                print(f"[Debug] Error initializing container: {str(e)}")
+                import traceback
+                print(f"[Debug] Full error: {traceback.format_exc()}")
+                raise
+        return self._mem0_container
 
     def add_texts(
         self,
@@ -54,31 +62,48 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         formatted_metadatas = []
         doc_ids = []
         
-        for idx, (text, metadata) in enumerate(zip(texts, metadatas)):
-            # Create a new metadata dict with required fields
-            formatted = metadata.copy()
-            doc_id = formatted.get('id') or str(uuid.uuid4())
-            formatted.update({
-                'id': doc_id,
-                'text': text,  # Store as 'text' for vector store
-                'data': text,  # Store as 'data' for Mem0
-                '_id': doc_id  # Backup ID field
-            })
-            
-            formatted_metadatas.append(formatted)
-            doc_ids.append(doc_id)
-            print(f"[Debug] Preparing document {idx + 1}: ID={doc_id}, Content={text[:50]}...")
-
-        # Call parent's add_texts with our formatted metadata
+        # Convert texts to list if it's not already
+        texts_list = list(texts)
+        
+        # Get embeddings for all texts at once
         try:
-            result = super().add_texts(texts, formatted_metadatas, **kwargs)
-            print(f"[Debug] Successfully added {len(doc_ids)} documents")
-            return doc_ids
+            embeddings = self._embedding.embed_documents(texts_list)
+            print(f"[Debug] Generated embeddings for {len(texts_list)} documents")
         except Exception as e:
-            print(f"[Debug] Error in add_texts: {str(e)}")
-            import traceback
-            print(f"[Debug] Full error: {traceback.format_exc()}")
+            print(f"[Debug] Error generating embeddings: {str(e)}")
             return []
+
+        for idx, (text, metadata, embedding) in enumerate(zip(texts_list, metadatas, embeddings)):
+            try:
+                # Create a new metadata dict with required fields
+                formatted = metadata.copy()
+                doc_id = formatted.get('id') or str(uuid.uuid4())
+                
+                # Create the document with all required fields
+                document = {
+                    'id': doc_id,
+                    'text': text,
+                    'data': text,
+                    'metadata': formatted,
+                    'vectorContent': embedding,
+                    'page_content': text
+                }
+                
+                # Store document directly
+                try:
+                    self.container.create_item(body=document)
+                    doc_ids.append(doc_id)
+                    print(f"[Debug] Successfully stored document {idx + 1}: ID={doc_id}")
+                except Exception as store_error:
+                    print(f"[Debug] Error storing document: {store_error}")
+                    continue
+                
+            except Exception as doc_error:
+                print(f"[Debug] Error processing document {idx + 1}: {doc_error}")
+                continue
+
+        print(f"[Debug] Successfully added {len(doc_ids)} documents")
+        return doc_ids
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 10, **kwargs: Any
@@ -86,38 +111,55 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         try:
             print("\n[Debug] Starting vector search...")
             
-            # Use the parent class's similarity_search method
-            docs = super().similarity_search(
-                query="",  # Empty query since we're using vector
-                k=k,
-                search_type="similarity",
-                vector=embedding,
-                **kwargs
-            )
+            # Perform vector search directly using Cosmos DB
+            query = """
+                SELECT *
+                FROM c
+                ORDER BY VectorDistance(c.vectorContent, @vector) ASC
+                OFFSET 0 LIMIT @k
+            """
             
-            print(f"[Debug] Found {len(docs)} results")
+            parameters = [
+                {"name": "@vector", "value": embedding},
+                {"name": "@k", "value": k}
+            ]
+            
+            results = list(self.container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True
+            ))
+            
+            print(f"[Debug] Found {len(results)} results")
             
             # Format documents for Mem0
             formatted_docs = []
-            for doc in docs:
+            for item in results:
                 try:
-                    # Start with existing metadata
-                    metadata = doc.metadata.copy() if doc.metadata else {}
+                    # Extract metadata and ensure required fields
+                    metadata = item.get('metadata', {}).copy()
+                    metadata.update({
+                        'id': item.get('id', str(uuid.uuid4())),
+                        'data': item.get('text', ''),
+                        'score': item.get('_vector_score', 0)
+                    })
                     
-                    # Ensure required fields
-                    if 'id' not in metadata:
-                        metadata['id'] = str(uuid.uuid4())
-                    metadata['data'] = doc.page_content
+                    # Get content from available fields
+                    content = (
+                        item.get('text', '') or 
+                        item.get('page_content', '') or 
+                        item.get('data', '')
+                    )
                     
                     # Create formatted document
-                    formatted_doc = Document(
-                        page_content=doc.page_content,
+                    doc = Document(
+                        page_content=content,
                         metadata=metadata
                     )
-                    formatted_docs.append(formatted_doc)
-                    print(f"[Debug] Processed document: ID={metadata['id']}, Content={doc.page_content[:50]}...")
+                    formatted_docs.append(doc)
+                    print(f"[Debug] Processed result: ID={metadata['id']}, Score={metadata['score']}")
                 except Exception as doc_error:
-                    print(f"[Debug] Error processing document: {doc_error}")
+                    print(f"[Debug] Error processing result: {doc_error}")
                     continue
             
             return formatted_docs
