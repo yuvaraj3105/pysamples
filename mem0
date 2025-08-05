@@ -1,5 +1,6 @@
 import os
 import sys
+import uuid
 from typing import Any, List, Iterable
 from dotenv import load_dotenv
 
@@ -48,9 +49,12 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         # Format documents with proper metadata structure for Mem0
         formatted_docs = []
         for doc, score in results:
-            # Ensure the document has the required 'data' field in metadata
+            # Ensure the document has the required fields in metadata
             metadata = doc.metadata.copy() if doc.metadata else {}
             metadata['data'] = doc.page_content
+            # Ensure we have an ID - either from metadata or generate one
+            if 'id' not in metadata:
+                metadata['id'] = doc.metadata.get('_id') or str(uuid.uuid4())
             formatted_doc = Document(
                 page_content=doc.page_content,
                 metadata=metadata
