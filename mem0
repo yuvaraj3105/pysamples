@@ -1,4 +1,4 @@
-0import os
+import os
 import uuid
 from typing import Any, List, Iterable
 from dotenv import load_dotenv
@@ -43,30 +43,40 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         Overrides add_texts to inject required metadata fields for mem0 and add debug prints.
         """
         texts_list = list(texts)
-        print(f"\n[Wrapper.add_texts] Intercepted call to add texts... {len(texts_list)} texts")
-        for idx, text in enumerate(texts_list):
+        # Filter out empty/whitespace-only texts
+        filtered = [(i, t) for i, t in enumerate(texts_list) if t and t.strip()]
+        if not filtered:
+            print(f"\n[Wrapper.add_texts] Skipping call: all texts empty or whitespace.")
+            return []
+        print(f"\n[Wrapper.add_texts] Intercepted call to add texts... {len(filtered)} texts")
+        for idx, text in filtered:
             print(f"  [Wrapper.add_texts] Text {idx+1}: {text[:80]}")
+        # Filter metadatas accordingly
         if not metadatas:
             metadatas = [{} for _ in texts_list]
-
-        # FIX: The parent's add_texts will use the `text_key` we provide at initialization
-        # to handle the text. We just need to ensure the metadata has the ID.
-        # mem0 relies on getting the original text back, which we store in the 'data' field.
-        for metadata, text in zip(metadatas, texts_list):
-            if "id" not in metadata:
-                metadata["id"] = str(uuid.uuid4())
-            metadata["data"] = text # mem0 needs this field to reconstruct the memory
-
-        print(f"[Wrapper.add_texts] Handing off {len(list(texts))} documents to parent method.")
+        filtered_texts = [t for _, t in filtered]
+        filtered_metadatas = [metadatas[i] for i, _ in filtered]
+        # Use filtered_texts and filtered_metadatas for the rest of the logic
+        formatted_metadatas = []
+        doc_ids = []
+        for idx, (text, metadata) in enumerate(zip(filtered_texts, filtered_metadatas)):
+            formatted = metadata.copy()
+            doc_id = formatted.get('id') or str(uuid.uuid4())
+            formatted.update({
+                'id': doc_id,
+                'text': text,  # Store as 'text' for vector store
+                'data': text,  # Store as 'data' for Mem0
+                '_id': doc_id  # Backup ID field
+            })
+            formatted_metadatas.append(formatted)
+            doc_ids.append(doc_id)
+            print(f"[Wrapper.add_texts] Preparing document {idx + 1}: ID={doc_id}, Content={text[:50]}...")
         try:
-            # Call the original, working add_texts method from the parent class
-            added_ids = super().add_texts(texts=texts, metadatas=metadatas, **kwargs)
-            print(f"[Wrapper.add_texts] Successfully added documents. IDs: {added_ids}")
-            return added_ids
+            result = super().add_texts(filtered_texts, formatted_metadatas, **kwargs)
+            print(f"[Wrapper.add_texts] Successfully added {len(doc_ids)} documents")
+            return doc_ids
         except Exception as e:
-            print(f"[Wrapper.add_texts] ERROR in parent add_texts: {e}")
-            import traceback
-            print(traceback.format_exc())
+            print(f"[Wrapper.add_texts] Error in add_texts: {str(e)}")
             return []
 
     def similarity_search_by_vector(
