@@ -210,11 +210,10 @@ vector_embedding_policy = {
     "vectorEmbeddings": [
         {
             "path": "/vectorContent",
-            "dataType": "float32",
+            "kind": "COSINE",
             "dimensions": EMBEDDING_DIMENSIONS,
-            "distanceFunction": "cosine",
-            "kind": "COSINE"
-        },
+            "similarity": "cosine"
+        }
     ]
 }
 
@@ -231,13 +230,17 @@ indexing_policy = {
     "excludedPaths": [
         {"path": '/"_etag"/?'}
     ],
-    "vectorIndexConfigs": [
+    "vectorIndexes": [
         {
-            "path": "/vectorContent/*",
+            "path": "/vectorContent",
             "type": "HNSW",
-            "config": {
-                "dimensions": EMBEDDING_DIMENSIONS,
-                "metric": "cosine"
+            "kind": "COSINE",
+            "numDimensions": EMBEDDING_DIMENSIONS,
+            "parameters": {
+                "metric": "cosine",
+                "m": 16,
+                "efConstruction": 400,
+                "efSearch": 500
             }
         }
     ]
