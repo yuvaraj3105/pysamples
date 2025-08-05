@@ -85,9 +85,11 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     'text': text,
                     'data': text,
                     'metadata': formatted,
-                    'vectorContent': embedding,
-                    'page_content': text
+                    'vectorContent': list(map(float, embedding)),  # Ensure vector is float list
+                    'page_content': text,
+                    'embedding_dimensions': len(embedding)
                 }
+                print(f"[Debug] Document structure: {document.keys()}")
                 
                 # Store document directly
                 try:
@@ -113,21 +115,34 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             
             # Perform vector search directly using Cosmos DB
             query = """
-                SELECT *
+                SELECT TOP @k *
                 FROM c
-                ORDER BY VectorDistance(c.vectorContent, @vector) ASC
-                OFFSET 0 LIMIT @k
+                WHERE IS_DEFINED(c.vectorContent)
             """
             
             parameters = [
-                {"name": "@vector", "value": embedding},
                 {"name": "@k", "value": k}
             ]
+            
+            # Add vector search options
+            options = {
+                'enableCrossPartitionQuery': True,
+                'consistencyLevel': 'Session',
+                'vectorSearchOptions': {
+                    'vector': embedding,
+                    'fields': [{
+                        'path': '/vectorContent',
+                        'similarity': 'cosine'
+                    }]
+                }
+            }
+            
+            print("[Debug] Vector search options:", options)
             
             results = list(self.container.query_items(
                 query=query,
                 parameters=parameters,
-                enable_cross_partition_query=True
+                **options
             ))
             
             print(f"[Debug] Found {len(results)} results")
@@ -198,21 +213,34 @@ vector_embedding_policy = {
             "dataType": "float32",
             "dimensions": EMBEDDING_DIMENSIONS,
             "distanceFunction": "cosine",
+            "kind": "COSINE"
         },
     ]
 }
 
 indexing_policy = {
+    "indexingMode": "consistent",
+    "automatic": True,
     "includedPaths": [
         {"path": "/*"},
         {"path": "/metadata/*"},
         {"path": "/id/?"},
-        {"path": "/data/?"}
+        {"path": "/data/?"},
+        {"path": "/vectorContent/?"}
     ],
-    "excludedPaths": [{"path": '/"_etag"/?'}],
-    "vectorIndexes": [
-        {"path": "/vectorContent", "type": "quantizedFlat"},
+    "excludedPaths": [
+        {"path": '/"_etag"/?'}
     ],
+    "vectorIndexConfigs": [
+        {
+            "path": "/vectorContent/*",
+            "type": "HNSW",
+            "config": {
+                "dimensions": EMBEDDING_DIMENSIONS,
+                "metric": "cosine"
+            }
+        }
+    ]
 }
 
 # --- Vector store ---
@@ -284,14 +312,15 @@ try:
     container = vector_store.container
     print(f"[Debug] Using container: {container.id}")
     
-    results = container.query_items(
-        query="SELECT * FROM c",
-        enable_scan_in_query=True,
-        parameters=[],
-    )
-    docs = list(results)
-    print(f"Found {len(docs)} total documents in collection")
-    for doc in docs:
+    # Query with cross-partition enabled
+    results = list(container.query_items(
+        query="SELECT * FROM c WHERE IS_DEFINED(c.vectorContent)",
+        enable_cross_partition_query=True,
+        parameters=[]
+    ))
+    
+    print(f"Found {len(results)} total documents in collection")
+    for doc in results:
         content = (
             doc.get("text", "") or 
             doc.get("page_content", "") or 
@@ -299,6 +328,7 @@ try:
             doc.get("data", "")
         )
         print(f"Document: ID={doc.get('id')}, Text={content[:50]}...")
+        print(f"Vector dimensions: {len(doc.get('vectorContent', []))}")
 except Exception as e:
     print(f"Error in direct retrieval: {str(e)}")
     import traceback
