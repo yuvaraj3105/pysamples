@@ -46,44 +46,45 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         if not metadatas:
             metadatas = [{} for _ in texts]
             
-        # Ensure each metadata has an ID
+        # Format metadatas for Mem0 compatibility
+        formatted_metadatas = []
         for metadata in metadatas:
-            if 'id' not in metadata:
-                metadata['id'] = str(uuid.uuid4())
+            formatted_metadata = metadata.copy()
+            # Ensure ID exists
+            if 'id' not in formatted_metadata:
+                formatted_metadata['id'] = str(uuid.uuid4())
+            # Store the text in the data field as required by Mem0
+            formatted_metadata['data'] = texts[len(formatted_metadatas)]
+            formatted_metadatas.append(formatted_metadata)
                 
-        # Call parent's add_texts
-        return super().add_texts(texts, metadatas, **kwargs)
+        # Call parent's add_texts with formatted metadata
+        return super().add_texts(texts, formatted_metadatas, **kwargs)
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
         """Perform similarity search using the vector."""
         try:
-            results = self.similarity_search_with_score(
-                query="",  # Empty string instead of None
+            # Use similarity_search directly with the vector
+            docs = self.similarity_search(
+                query="",  # Empty string as query
                 k=k,
+                search_type="similarity",
                 vector=embedding,
                 **kwargs
             )
             
-            # Format documents with proper metadata structure for Mem0
+            # Format documents for Mem0 compatibility
             formatted_docs = []
-            for doc, score in results:
-                # Start with original metadata or empty dict
+            for doc in docs:
                 metadata = doc.metadata.copy() if doc.metadata else {}
                 
-                # Ensure required fields
-                metadata['data'] = doc.page_content
+                # Ensure required fields for Mem0
                 if 'id' not in metadata:
-                    # Try to get ID from various possible locations
-                    metadata['id'] = (
-                        metadata.get('_id') or 
-                        metadata.get('id') or 
-                        metadata.get('document_id') or 
-                        str(uuid.uuid4())
-                    )
+                    metadata['id'] = str(uuid.uuid4())
+                metadata['data'] = doc.page_content
                 
-                # Create formatted document
+                # Create new document with proper metadata
                 formatted_doc = Document(
                     page_content=doc.page_content,
                     metadata=metadata
@@ -93,7 +94,6 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             return formatted_docs
         except Exception as e:
             print(f"Error in similarity_search_by_vector: {e}")
-            # Return empty list on error to allow graceful degradation
             return []
 
 # --- Initialize Clients ---
@@ -125,7 +125,9 @@ vector_embedding_policy = {
 indexing_policy = {
     "includedPaths": [
         {"path": "/*"},
-        {"path": "/metadata/*"}  # Ensure metadata fields are indexed
+        {"path": "/metadata/*"},  # Index all metadata fields
+        {"path": "/id/?"},        # Explicitly index ID field
+        {"path": "/data/?"}       # Explicitly index data field
     ],
     "excludedPaths": [{"path": '/"_etag"/?'}],
     "vectorIndexes": [
