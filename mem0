@@ -82,6 +82,10 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     embedding=embedding,
                     **kwargs
                 )
+                # Ensure every Document has a valid string id
+                for doc in results:
+                    if not isinstance(doc.metadata.get("id"), str) or not doc.metadata.get("id"):
+                        doc.metadata["id"] = str(uuid.uuid4())
                 print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
                 for doc in results:
                     print(f"  - Match: {doc.page_content[:80]}...")
@@ -123,6 +127,9 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                         page_content=content,
                         metadata=metadata
                     )
+                    # Ensure every Document has a valid string id
+                    if not isinstance(doc.metadata.get("id"), str) or not doc.metadata.get("id"):
+                        doc.metadata["id"] = str(uuid.uuid4())
                     formatted_docs.append(doc)
                     print(f"  - Fallback Match (Score: {metadata['score']}): {content[:80]}...")
                 return formatted_docs
@@ -243,14 +250,14 @@ try:
     docs = list(results)
     print(f"Found {len(docs)} total documents in collection")
     for doc in docs:
-        print(f"Document: ID={doc.get('id')}, Text={doc.get('text', '')[:50]}...")
+        print(f"Document: ID={doc.get('id')}, Text={doc.get('text', '')}")
         content = (
             doc.get("text", "") or 
             doc.get("page_content", "") or 
             doc.get("content", "") or 
             doc.get("data", "")
         )
-        print(f"Document: ID={doc.get('id')}, Text={content[:50]}...")
+        print(f"Document: ID={doc.get('id')}, Text={content}")
 except Exception as e:
     print(f"Error in direct retrieval: {str(e)}")
     import traceback
