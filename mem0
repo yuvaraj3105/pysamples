@@ -41,14 +41,17 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         """
         Overrides add_texts to inject required metadata fields for mem0 and add debug prints.
         """
-        print("\n[Wrapper.add_texts] Intercepted call to add texts...")
+        texts_list = list(texts)
+        print(f"\n[Wrapper.add_texts] Intercepted call to add texts... {len(texts_list)} texts")
+        for idx, text in enumerate(texts_list):
+            print(f"  [Wrapper.add_texts] Text {idx+1}: {text[:80]}")
         if not metadatas:
-            metadatas = [{} for _ in texts]
+            metadatas = [{} for _ in texts_list]
 
         # FIX: The parent's add_texts will use the `text_key` we provide at initialization
         # to handle the text. We just need to ensure the metadata has the ID.
         # mem0 relies on getting the original text back, which we store in the 'data' field.
-        for metadata, text in zip(metadatas, texts):
+        for metadata, text in zip(metadatas, texts_list):
             if "id" not in metadata:
                 metadata["id"] = str(uuid.uuid4())
             metadata["data"] = text # mem0 needs this field to reconstruct the memory
@@ -85,6 +88,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                 # Ensure every Document has a valid string id
                 for doc in results:
                     doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
+                    setattr(doc, "id", doc.metadata["id"])
                 print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
                 for doc in results:
                     print(f"  - Match: {doc.page_content}")
@@ -128,6 +132,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     )
                     # Ensure every Document has a valid string id
                     doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
+                    setattr(doc, "id", doc.metadata["id"])
                     formatted_docs.append(doc)
                     print(f"  - Fallback Match (Score: {metadata['score']}): {content}")
                 return formatted_docs
