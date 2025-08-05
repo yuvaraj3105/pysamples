@@ -1,10 +1,9 @@
 import os
-import sys
 import uuid
 from typing import Any, List, Iterable
 from dotenv import load_dotenv
 
-# Ensure you have the latest required packages
+# Required packages:
 # pip install -U langchain-azure-ai mem0 langchain-openai azure-cosmos azure-identity
 
 from langchain_azure_ai.vectorstores import AzureCosmosDBNoSqlVectorSearch
@@ -27,70 +26,64 @@ cosmosdb_endpoint = os.getenv("AZURE_COSMOSDB_ENDPOINT")
 cosmosdb_database_name = os.getenv("AZURE_COSMOSDB_DATABASE_NAME")
 cosmosdb_container_name = "mem0"
 
-
-# --- Wrapper Class to Bridge Library Incompatibilities ---
+# --- Wrapper Class for Compatibility with Mem0 ---
 
 class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
     """
     A wrapper for AzureCosmosDBNoSqlVectorSearch to make it fully
-    compatible with mem0. Handles proper document formatting and ID management.
+    compatible with mem0. Ensures proper formatting and metadata.
     """
-    
+
     def add_texts(
         self,
         texts: Iterable[str],
         metadatas: List[dict] | None = None,
         **kwargs: Any,
     ) -> List[str]:
-        """Override add_texts to ensure proper ID handling."""
+        """Ensure each document has 'id' and 'data' fields."""
         if not metadatas:
             metadatas = [{} for _ in texts]
-            
-        # Format metadatas for Mem0 compatibility
+
         formatted_metadatas = []
-        for metadata in metadatas:
-            formatted_metadata = metadata.copy()
-            # Ensure ID exists
-            if 'id' not in formatted_metadata:
-                formatted_metadata['id'] = str(uuid.uuid4())
-            # Store the text in the data field as required by Mem0
-            formatted_metadata['data'] = texts[len(formatted_metadatas)]
-            formatted_metadatas.append(formatted_metadata)
-                
-        # Call parent's add_texts with formatted metadata
+        for idx, metadata in enumerate(metadatas):
+            formatted = metadata.copy()
+            if 'id' not in formatted or not formatted['id']:
+                formatted['id'] = str(uuid.uuid4())
+            formatted['data'] = texts[idx]
+            formatted_metadatas.append(formatted)
+
         return super().add_texts(texts, formatted_metadatas, **kwargs)
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
-        """Perform similarity search using the vector."""
+        """Ensure returned documents have 'id' and 'data'."""
         try:
-            # Use similarity_search directly with the vector
             docs = self.similarity_search(
-                query="",  # Empty string as query
+                query="",
                 k=k,
                 search_type="similarity",
                 vector=embedding,
                 **kwargs
             )
-            
-            # Format documents for Mem0 compatibility
+
             formatted_docs = []
             for doc in docs:
                 metadata = doc.metadata.copy() if doc.metadata else {}
-                
-                # Ensure required fields for Mem0
-                if 'id' not in metadata:
-                    metadata['id'] = str(uuid.uuid4())
-                metadata['data'] = doc.page_content
-                
-                # Create new document with proper metadata
+
+                # ✅ Ensure valid 'id' field
+                if not metadata.get("id"):
+                    metadata["id"] = str(uuid.uuid4())
+
+                # ✅ Ensure 'data' field required by mem0
+                metadata["data"] = doc.page_content
+
                 formatted_doc = Document(
                     page_content=doc.page_content,
                     metadata=metadata
                 )
                 formatted_docs.append(formatted_doc)
-            
+
             return formatted_docs
         except Exception as e:
             print(f"Error in similarity_search_by_vector: {e}")
@@ -105,7 +98,6 @@ embedder = AzureOpenAIEmbeddings(
     azure_endpoint=azure_openai_endpoint,
     api_key=azure_openai_api_key
 )
-EMBEDDING_DIMENSIONS = 1536
 
 llm = AzureChatOpenAI(
     azure_deployment=azure_openai_deployment_name,
@@ -117,17 +109,24 @@ llm = AzureChatOpenAI(
 credential = DefaultAzureCredential()
 cosmos_client = CosmosClient(url=cosmosdb_endpoint, credential=credential)
 
+EMBEDDING_DIMENSIONS = 1536
+
 vector_embedding_policy = {
     "vectorEmbeddings": [
-        {"path": "/vectorContent", "dataType": "float32", "dimensions": EMBEDDING_DIMENSIONS, "distanceFunction": "cosine"},
+        {
+            "path": "/vectorContent",
+            "dataType": "float32",
+            "dimensions": EMBEDDING_DIMENSIONS,
+            "distanceFunction": "cosine",
+        },
     ]
 }
 indexing_policy = {
     "includedPaths": [
         {"path": "/*"},
-        {"path": "/metadata/*"},  # Index all metadata fields
-        {"path": "/id/?"},        # Explicitly index ID field
-        {"path": "/data/?"}       # Explicitly index data field
+        {"path": "/metadata/*"},
+        {"path": "/id/?"},
+        {"path": "/data/?"}
     ],
     "excludedPaths": [{"path": '/"_etag"/?'}],
     "vectorIndexes": [
@@ -135,9 +134,10 @@ indexing_policy = {
     ],
 }
 
-# --- Instantiate our Wrapper Class with the Correct Constructor Arguments ---
+# --- Initialize Vector Store ---
 print("Initializing Azure Cosmos DB for NoSQL Vector Store...")
-vector_store = CosmosDBMem0Wrapper( # <-- Use the wrapper here
+
+vector_store = CosmosDBMem0Wrapper(
     cosmos_client=cosmos_client,
     database_name=cosmosdb_database_name,
     container_name=cosmosdb_container_name,
@@ -146,34 +146,32 @@ vector_store = CosmosDBMem0Wrapper( # <-- Use the wrapper here
     indexing_policy=indexing_policy,
     cosmos_container_properties={"partition_key": {"paths": ["/id"], "kind": "Hash"}},
     cosmos_database_properties={},
-    # *** THE DEFINITIVE FIX IS HERE ***
-    # The `text_key` and `embedding_key` must be inside the `vector_search_fields` dictionary.
-    # The `text_key` is set to "text" to match the field name mem0 uses internally.
     vector_search_fields={
         "text_field": "text",
         "embedding_field": "vectorContent",
-        "metadata_field": "metadata"
+        "metadata_field": "metadata",
     }
 )
+
 print("Vector store initialized successfully.")
 
-# --- Configure Mem0 ---
+# --- Mem0 Configuration ---
 config = {
     "vector_store": {
         "provider": "langchain",
-        "config": { "client": vector_store }
+        "config": {"client": vector_store},
     },
     "llm": {
         "provider": "langchain",
-        "config": { "model": llm, }
+        "config": {"model": llm},
     },
     "embedder": {
         "provider": "langchain",
-        "config": { "model": embedder, }
+        "config": {"model": embedder},
     },
 }
 
-# --- Create Memory Instance and Use It ---
+# --- Run Mem0 Memory ---
 print("\nInitializing Mem0 from config...")
 m = Memory.from_config(config)
 print("Mem0 initialized.")
@@ -182,15 +180,13 @@ messages = [
     {"role": "user", "content": "My favorite movies are 'The Matrix' and 'Inception'."},
     {"role": "assistant", "content": "Great choices!"},
     {"role": "user", "content": "I also love 'Blade Runner 2049'."},
-    {"role": "assistant", "content": "A modern classic!"}
+    {"role": "assistant", "content": "A modern classic!"},
 ]
 
-# This will now work correctly.
 print("\nAdding memories...")
 result = m.add(messages, user_id="alice", metadata={"category": "movies"})
 print("Added memories:", result)
 
-# This will now find and return the stored memories.
 print("\nSearching for memories...")
 search_results = m.search("What movies does the user like?", user_id="alice")
 print("Search results:", search_results)
