@@ -89,6 +89,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                 for doc in results:
                     doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
                     setattr(doc, "id", doc.metadata["id"])
+                    doc.metadata["data"] = doc.page_content
                 print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
                 for doc in results:
                     print(f"  - Match: {doc.page_content}")
@@ -133,6 +134,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     # Ensure every Document has a valid string id
                     doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
                     setattr(doc, "id", doc.metadata["id"])
+                    doc.metadata["data"] = doc.page_content
                     formatted_docs.append(doc)
                     print(f"  - Fallback Match (Score: {metadata['score']}): {content}")
                 return formatted_docs
