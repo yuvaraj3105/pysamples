@@ -25,164 +25,75 @@ azure_openai_embedding_deployment_name = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLO
 cosmosdb_endpoint = os.getenv("AZURE_COSMOSDB_ENDPOINT")
 cosmosdb_database_name = os.getenv("AZURE_COSMOSDB_DATABASE_NAME")
 cosmosdb_container_name = "mem0"
+EMBEDDING_DIMENSIONS = 1536
 
 # --- Wrapper Class ---
 class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Initialize container reference
-        self._mem0_container = None
-
-    @property
-    def container(self):
-        """Get the container reference, initializing if needed."""
-        if self._mem0_container is None:
-            try:
-                # Access the protected attributes from parent class
-                database = self._cosmos_client.get_database_client(self._database_name)
-                self._mem0_container = database.get_container_client(self._container_name)
-                print(f"[Debug] Successfully initialized container: {self._container_name}")
-            except Exception as e:
-                print(f"[Debug] Error initializing container: {str(e)}")
-                import traceback
-                print(f"[Debug] Full error: {traceback.format_exc()}")
-                raise
-        return self._mem0_container
-
+    """
+    A wrapper to add detailed debugging and ensure compatibility with mem0.
+    """
     def add_texts(
         self,
         texts: Iterable[str],
         metadatas: List[dict] | None = None,
         **kwargs: Any,
     ) -> List[str]:
-        print("\n[Debug] Adding texts...")
+        """
+        Overrides add_texts to inject required metadata fields for mem0 and add debug prints.
+        """
+        print("\n[Wrapper.add_texts] Intercepted call to add texts...")
         if not metadatas:
             metadatas = [{} for _ in texts]
 
-        formatted_metadatas = []
-        doc_ids = []
-        
-        # Convert texts to list if it's not already
-        texts_list = list(texts)
-        
-        # Get embeddings for all texts at once
+        # FIX: The parent's add_texts will use the `text_key` we provide at initialization
+        # to handle the text. We just need to ensure the metadata has the ID.
+        # mem0 relies on getting the original text back, which we store in the 'data' field.
+        for metadata, text in zip(metadatas, texts):
+            if "id" not in metadata:
+                metadata["id"] = str(uuid.uuid4())
+            metadata["data"] = text # mem0 needs this field to reconstruct the memory
+
+        print(f"[Wrapper.add_texts] Handing off {len(list(texts))} documents to parent method.")
         try:
-            embeddings = self._embedding.embed_documents(texts_list)
-            print(f"[Debug] Generated embeddings for {len(texts_list)} documents")
+            # Call the original, working add_texts method from the parent class
+            added_ids = super().add_texts(texts=texts, metadatas=metadatas, **kwargs)
+            print(f"[Wrapper.add_texts] Successfully added documents. IDs: {added_ids}")
+            return added_ids
         except Exception as e:
-            print(f"[Debug] Error generating embeddings: {str(e)}")
+            print(f"[Wrapper.add_texts] ERROR in parent add_texts: {e}")
+            import traceback
+            print(traceback.format_exc())
             return []
-
-        for idx, (text, metadata, embedding) in enumerate(zip(texts_list, metadatas, embeddings)):
-            try:
-                # Create a new metadata dict with required fields
-                formatted = metadata.copy()
-                doc_id = formatted.get('id') or str(uuid.uuid4())
-                
-                # Create the document with all required fields
-                document = {
-                    'id': doc_id,
-                    'text': text,
-                    'data': text,
-                    'metadata': formatted,
-                    'vectorContent': list(map(float, embedding)),  # Ensure vector is float list
-                    'page_content': text,
-                    'embedding_dimensions': len(embedding)
-                }
-                print(f"[Debug] Document structure: {document.keys()}")
-                
-                # Store document directly
-                try:
-                    self.container.create_item(body=document)
-                    doc_ids.append(doc_id)
-                    print(f"[Debug] Successfully stored document {idx + 1}: ID={doc_id}")
-                except Exception as store_error:
-                    print(f"[Debug] Error storing document: {store_error}")
-                    continue
-                
-            except Exception as doc_error:
-                print(f"[Debug] Error processing document {idx + 1}: {doc_error}")
-                continue
-
-        print(f"[Debug] Successfully added {len(doc_ids)} documents")
-        return doc_ids
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 10, **kwargs: Any
     ) -> List[Document]:
+        """
+        Overrides similarity_search to add detailed debugging.
+        Instead of recreating the query logic, we call the parent's reliable method.
+        """
+        print(f"\n[Wrapper.similarity_search] Intercepted vector search with k={k}...")
         try:
-            print("\n[Debug] Starting vector search...")
+            # FIX: Call the parent's search method that returns documents and scores
+            results_with_scores = super().similarity_search_with_score_by_vector(
+                embedding=embedding, k=k, **kwargs
+            )
+            print(f"[Wrapper.similarity_search] Parent method returned {len(results_with_scores)} results.")
+
+            # Process results for debugging and return the documents
+            final_documents = []
+            for doc, score in results_with_scores:
+                doc.metadata["score"] = score
+                final_documents.append(doc)
+                print(f"  - Match (Score: {score:.4f}): {doc.page_content[:80]}...")
             
-            # Perform vector search directly using Cosmos DB
-            query = """
-                SELECT TOP @k *
-                FROM c
-                WHERE IS_DEFINED(c.vectorContent)
-            """
-            
-            parameters = [
-                {"name": "@k", "value": k}
-            ]
-            
-            # Add vector search options
-            options = {
-                'enableCrossPartitionQuery': True,
-                'consistencyLevel': 'Session',
-                'vectorSearchOptions': {
-                    'vector': embedding,
-                    'fields': [{
-                        'path': '/vectorContent',
-                        'similarity': 'cosine'
-                    }]
-                }
-            }
-            
-            print("[Debug] Vector search options:", options)
-            
-            results = list(self.container.query_items(
-                query=query,
-                parameters=parameters,
-                **options
-            ))
-            
-            print(f"[Debug] Found {len(results)} results")
-            
-            # Format documents for Mem0
-            formatted_docs = []
-            for item in results:
-                try:
-                    # Extract metadata and ensure required fields
-                    metadata = item.get('metadata', {}).copy()
-                    metadata.update({
-                        'id': item.get('id', str(uuid.uuid4())),
-                        'data': item.get('text', ''),
-                        'score': item.get('_vector_score', 0)
-                    })
-                    
-                    # Get content from available fields
-                    content = (
-                        item.get('text', '') or 
-                        item.get('page_content', '') or 
-                        item.get('data', '')
-                    )
-                    
-                    # Create formatted document
-                    doc = Document(
-                        page_content=content,
-                        metadata=metadata
-                    )
-                    formatted_docs.append(doc)
-                    print(f"[Debug] Processed result: ID={metadata['id']}, Score={metadata['score']}")
-                except Exception as doc_error:
-                    print(f"[Debug] Error processing result: {doc_error}")
-                    continue
-            
-            return formatted_docs
+            return final_documents
         except Exception as e:
-            print(f"[Debug] Error in similarity_search_by_vector: {str(e)}")
+            print(f"[Wrapper.similarity_search] ERROR in parent search: {str(e)}")
             import traceback
-            print(f"[Debug] Full error: {traceback.format_exc()}")
+            print(traceback.format_exc())
             return []
+
 
 # --- Initialize services ---
 print("Initializing clients...")
@@ -204,51 +115,23 @@ llm = AzureChatOpenAI(
 credential = DefaultAzureCredential()
 cosmos_client = CosmosClient(url=cosmosdb_endpoint, credential=credential)
 
-EMBEDDING_DIMENSIONS = 1536
-
 vector_embedding_policy = {
     "vectorEmbeddings": [
-        {
-            "path": "/vectorContent",
-            "kind": "COSINE",
-            "dimensions": EMBEDDING_DIMENSIONS,
-            "similarity": "cosine"
-        }
+        {"path": "/vectorContent", "dataType": "float32", "dimensions": EMBEDDING_DIMENSIONS, "distanceFunction": "cosine"},
     ]
 }
 
 indexing_policy = {
-    "indexingMode": "consistent",
-    "automatic": True,
-    "includedPaths": [
-        {"path": "/*"},
-        {"path": "/metadata/*"},
-        {"path": "/id/?"},
-        {"path": "/data/?"},
-        {"path": "/vectorContent/?"}
-    ],
-    "excludedPaths": [
-        {"path": '/"_etag"/?'}
-    ],
-    "vectorIndexes": [
-        {
-            "path": "/vectorContent",
-            "type": "HNSW",
-            "kind": "COSINE",
-            "numDimensions": EMBEDDING_DIMENSIONS,
-            "parameters": {
-                "metric": "cosine",
-                "m": 16,
-                "efConstruction": 400,
-                "efSearch": 500
-            }
-        }
-    ]
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [{"path": '/"_etag"/?'}],
+    "vectorIndexes": [{"path": "/vectorContent", "type": "quantizedFlat"}],
 }
 
 # --- Vector store ---
 print("Initializing Azure Cosmos DB for NoSQL Vector Store...")
 
+# FIX: Correctly initialize the vector store with direct keyword arguments.
+# Do NOT use a `vector_search_fields` dictionary.
 vector_store = CosmosDBMem0Wrapper(
     cosmos_client=cosmos_client,
     database_name=cosmosdb_database_name,
@@ -256,13 +139,9 @@ vector_store = CosmosDBMem0Wrapper(
     embedding=embedder,
     vector_embedding_policy=vector_embedding_policy,
     indexing_policy=indexing_policy,
-    cosmos_container_properties={"partition_key": {"paths": ["/id"], "kind": "Hash"}},
-    cosmos_database_properties={},
-    vector_search_fields={
-        "text_field": "text",
-        "embedding_field": "vectorContent",
-        "metadata_field": "metadata",
-    }
+    text_key="text",                 # <-- This tells LangChain what field to use for the main text
+    embedding_key="vectorContent",   # <-- This tells LangChain what field holds the vector
+    metadata_key="metadata",         # <-- This tells LangChain what field holds the metadata
 )
 
 print("Vector store initialized successfully.")
@@ -297,58 +176,11 @@ messages = [
 ]
 
 # --- Add Memories ---
-print("\nAdding memories...")
+print("\n--- ADDING MEMORIES ---")
 result = m.add(messages, user_id="alice", metadata={"category": "movies"})
-print("Added memories:", result)
+print("\n[Result] Added memories:", result)
 
 # --- Mem0 Search ---
-print("\nSearching for memories...")
+print("\n--- SEARCHING MEMORIES ---")
 search_results = m.search("What movies does the user like?", user_id="alice")
-print("Search results:", search_results)
-
-# --- Direct Vector Search Debug ---
-print("\n[Debug] Running comprehensive vector search test:")
-
-# Test direct document retrieval
-print("\n1. Testing direct document retrieval:")
-try:
-    container = vector_store.container
-    print(f"[Debug] Using container: {container.id}")
-    
-    # Query with cross-partition enabled
-    results = list(container.query_items(
-        query="SELECT * FROM c WHERE IS_DEFINED(c.vectorContent)",
-        enable_cross_partition_query=True,
-        parameters=[]
-    ))
-    
-    print(f"Found {len(results)} total documents in collection")
-    for doc in results:
-        content = (
-            doc.get("text", "") or 
-            doc.get("page_content", "") or 
-            doc.get("content", "") or 
-            doc.get("data", "")
-        )
-        print(f"Document: ID={doc.get('id')}, Text={content[:50]}...")
-        print(f"Vector dimensions: {len(doc.get('vectorContent', []))}")
-except Exception as e:
-    print(f"Error in direct retrieval: {str(e)}")
-    import traceback
-    print(f"Full error: {traceback.format_exc()}")
-
-# Test vector search
-print("\n2. Testing vector search:")
-query = "What movies does the user like?"
-try:
-    query_embedding = embedder.embed_query(query)
-    print("Generated query embedding successfully")
-    
-    results = vector_store.similarity_search_by_vector(query_embedding, k=10)
-    print(f"\nFound {len(results)} results via vector search")
-    for doc in results:
-        print(f"Match (score={doc.metadata.get('score', 'N/A')}):")
-        print(f"  ID: {doc.metadata.get('id', 'N/A')}")
-        print(f"  Content: {doc.page_content[:100]}...")
-except Exception as e:
-    print(f"Error in vector search test: {str(e)}")
+print("\n[Result] Search results:", search_results)
