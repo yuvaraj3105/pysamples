@@ -84,11 +84,10 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                 )
                 # Ensure every Document has a valid string id
                 for doc in results:
-                    if not isinstance(doc.metadata.get("id"), str) or not doc.metadata.get("id"):
-                        doc.metadata["id"] = str(uuid.uuid4())
+                    doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
                 print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
                 for doc in results:
-                    print(f"  - Match: {doc.page_content[:80]}...")
+                    print(f"  - Match: {doc.page_content}")
                 return results
             except NotImplementedError:
                 print("[Wrapper.similarity_search] super().similarity_search not implemented. Falling back to Cosmos DB SDK.")
@@ -128,10 +127,9 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                         metadata=metadata
                     )
                     # Ensure every Document has a valid string id
-                    if not isinstance(doc.metadata.get("id"), str) or not doc.metadata.get("id"):
-                        doc.metadata["id"] = str(uuid.uuid4())
+                    doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
                     formatted_docs.append(doc)
-                    print(f"  - Fallback Match (Score: {metadata['score']}): {content[:80]}...")
+                    print(f"  - Fallback Match (Score: {metadata['score']}): {content}")
                 return formatted_docs
         except Exception as e:
             print(f"[Wrapper.similarity_search] ERROR in parent search: {str(e)}")
@@ -200,16 +198,22 @@ print("Cleaning up all documents in the container before running...")
 container = vector_store._container
 # Query all documents (cross-partition)
 docs = list(container.query_items(
-    query="SELECT c.id FROM c",
+    query="SELECT * FROM c",
     enable_cross_partition_query=True
 ))
+print(f"Found {len(docs)} documents in the container before cleanup.")
 deleted_count = 0
 for doc in docs:
+    doc_id = doc.get('id')
+    print(f"Found document with id: {doc_id}")
+    if not doc_id:
+        print(f"Skipping document with missing id: {doc}")
+        continue
     try:
-        container.delete_item(item=doc['id'], partition_key=doc['id'])
+        container.delete_item(item=doc_id, partition_key=doc_id)
         deleted_count += 1
     except Exception as e:
-        print(f"Failed to delete document {doc['id']}: {e}")
+        print(f"Failed to delete document {doc_id}: {e}")
 print(f"Deleted {deleted_count} documents from the container.")
 
 # --- Mem0 Config ---
