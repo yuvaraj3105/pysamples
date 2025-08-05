@@ -69,26 +69,63 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         self, embedding: List[float], k: int = 10, **kwargs: Any
     ) -> List[Document]:
         """
-        Overrides similarity_search to add detailed debugging.
-        Instead of recreating the query logic, we call the parent's reliable method.
+        Try super().similarity_search; if not implemented, fallback to Cosmos DB SDK vector search.
         """
         print(f"\n[Wrapper.similarity_search] Intercepted vector search with k={k}...")
         try:
-            # FIX: Call the parent's search method that returns documents
-            results = super().similarity_search_by_vector(
-                embedding=embedding, k=k, **kwargs
-            )
-            print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
-
-            # Process results for debugging and return the documents
-            final_documents = []
-            for doc in results:
-                # Optionally, add a dummy score if needed for compatibility
-                doc.metadata["score"] = doc.metadata.get("score", None)
-                final_documents.append(doc)
-                print(f"  - Match: {doc.page_content[:80]}...")
-            
-            return final_documents
+            # Try the parent's similarity_search method
+            try:
+                print("[Wrapper.similarity_search] Trying super().similarity_search...")
+                results = super().similarity_search(
+                    "",  # query string (not used if embedding is provided)
+                    k=k,
+                    embedding=embedding,
+                    **kwargs
+                )
+                print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
+                for doc in results:
+                    print(f"  - Match: {doc.page_content[:80]}...")
+                return results
+            except NotImplementedError:
+                print("[Wrapper.similarity_search] super().similarity_search not implemented. Falling back to Cosmos DB SDK.")
+                # Fallback: Use Cosmos DB SDK for vector search
+                container = self._container
+                # Cosmos DB vector search syntax may vary; adjust as needed for your SDK version
+                results = container.query_items(
+                    query="SELECT * FROM c",
+                    enable_cross_partition_query=True,
+                    parameters=[],
+                    vector=embedding,
+                    top_k=k,
+                    vector_fields=[{
+                        "path": "/vectorContent",
+                        "distance_type": "CosineDistance"
+                    }]
+                )
+                docs_list = list(results)
+                print(f"[Wrapper.similarity_search] Cosmos DB SDK returned {len(docs_list)} results.")
+                formatted_docs = []
+                for item in docs_list:
+                    metadata = {
+                        "id": item.get("id") or str(uuid.uuid4()),
+                        "data": item.get("text", "") or item.get("page_content", ""),
+                        "score": item.get("_vector_score", 0)
+                    }
+                    if "metadata" in item:
+                        metadata.update(item["metadata"])
+                    content = (
+                        item.get("text", "") or 
+                        item.get("page_content", "") or 
+                        item.get("content", "") or 
+                        metadata.get("data", "")
+                    )
+                    doc = Document(
+                        page_content=content,
+                        metadata=metadata
+                    )
+                    formatted_docs.append(doc)
+                    print(f"  - Fallback Match (Score: {metadata['score']}): {content[:80]}...")
+                return formatted_docs
         except Exception as e:
             print(f"[Wrapper.similarity_search] ERROR in parent search: {str(e)}")
             import traceback
