@@ -222,28 +222,24 @@ vector_store = CosmosDBMem0Wrapper(
 
 print("Vector store initialized successfully.")
 
-# --- Clean up all documents in the container before running ---
-print("Cleaning up all documents in the container before running...")
-container = vector_store._container
-# Query all documents (cross-partition)
-docs = list(container.query_items(
-    query="SELECT * FROM c",
-    enable_cross_partition_query=True
-))
-print(f"Found {len(docs)} documents in the container before cleanup.")
-deleted_count = 0
-for doc in docs:
-    doc_id = doc.get('id')
-    print(f"Found document with id: {doc_id}")
-    if not doc_id:
-        print(f"Skipping document with missing id: {doc}")
-        continue
-    try:
-        container.delete_item(item=doc_id, partition_key=doc_id)
-        deleted_count += 1
-    except Exception as e:
-        print(f"Failed to delete document {doc_id}: {e}")
-print(f"Deleted {deleted_count} documents from the container.")
+print("Dropping and recreating the container for a clean slate...")
+db = vector_store._client.get_database_client(vector_store._database_name)
+try:
+    db.delete_container(vector_store._container_name)
+    print("Container deleted.")
+except Exception as e:
+    print(f"Container delete failed (may not exist): {e}")
+
+# Recreate the container with the same properties as before
+try:
+    db.create_container(
+        id=vector_store._container_name,
+        partition_key=vector_store._container_properties['partition_key'],
+        indexing_policy=vector_store._indexing_policy
+    )
+    print("Container recreated.")
+except Exception as e:
+    print(f"Container creation failed: {e}")
 
 # --- Mem0 Config ---
 config = {
