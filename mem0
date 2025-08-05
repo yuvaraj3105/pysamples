@@ -139,9 +139,8 @@ vector_store = CosmosDBMem0Wrapper(
     embedding=embedder,
     vector_embedding_policy=vector_embedding_policy,
     indexing_policy=indexing_policy,
-    text_key="text",                 # <-- This tells LangChain what field to use for the main text
-    embedding_key="vectorContent",   # <-- This tells LangChain what field holds the vector
-    metadata_key="metadata",         # <-- This tells LangChain what field holds the metadata
+    cosmos_container_properties={"partition_key": {"paths": ["/id"], "kind": "Hash"}},
+    cosmos_database_properties={},
 )
 
 print("Vector store initialized successfully.")
