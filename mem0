@@ -30,7 +30,8 @@ EMBEDDING_DIMENSIONS = 1536
 # --- Wrapper Class ---
 class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
     """
-    A wrapper to add detailed debugging and ensure compatibility with mem0.
+    A wrapper to add detailed debugging and ensure compatibility with mem0
+    by managing the 'data' field required by mem0 in the metadata.
     """
     def add_texts(
         self,
@@ -39,61 +40,42 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         **kwargs: Any,
     ) -> List[str]:
         """
-        Overrides add_texts to inject required metadata fields for mem0 and add debug prints.
+        Overrides add_texts to ensure the 'data' field required by mem0
+        is present in the metadata before being stored.
         """
         print("\n[Wrapper.add_texts] Intercepted call to add texts...")
         if not metadatas:
             metadatas = [{} for _ in texts]
-
-        # FIX: The parent's add_texts will use the `text_key` we provide at initialization
-        # to handle the text. We just need to ensure the metadata has the ID.
-        # mem0 relies on getting the original text back, which we store in the 'data' field.
+        
+        # FIX: Ensure each metadata blob contains the 'data' field that mem0 will need on retrieval.
+        # This metadata will be stored by the parent class.
         for metadata, text in zip(metadatas, texts):
-            if "id" not in metadata:
-                metadata["id"] = str(uuid.uuid4())
-            metadata["data"] = text # mem0 needs this field to reconstruct the memory
+            metadata['data'] = text 
 
         print(f"[Wrapper.add_texts] Handing off {len(list(texts))} documents to parent method.")
-        try:
-            # Call the original, working add_texts method from the parent class
-            added_ids = super().add_texts(texts=texts, metadatas=metadatas, **kwargs)
-            print(f"[Wrapper.add_texts] Successfully added documents. IDs: {added_ids}")
-            return added_ids
-        except Exception as e:
-            print(f"[Wrapper.add_texts] ERROR in parent add_texts: {e}")
-            import traceback
-            print(traceback.format_exc())
-            return []
+        return super().add_texts(texts=texts, metadatas=metadatas, **kwargs)
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 10, **kwargs: Any
     ) -> List[Document]:
         """
-        Overrides similarity_search to add detailed debugging.
-        Instead of recreating the query logic, we call the parent's reliable method.
+        Overrides similarity_search to ensure the returned documents
+        are compatible with mem0's expectations.
         """
         print(f"\n[Wrapper.similarity_search] Intercepted vector search with k={k}...")
-        try:
-            # FIX: Call the parent's search method that returns documents and scores
-            results_with_scores = super().similarity_search_with_score_by_vector(
-                embedding=embedding, k=k, **kwargs
-            )
-            print(f"[Wrapper.similarity_search] Parent method returned {len(results_with_scores)} results.")
+        
+        # Get the standard documents from the parent search method
+        results = super().similarity_search_by_vector(embedding=embedding, k=k, **kwargs)
+        print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
 
-            # Process results for debugging and return the documents
-            final_documents = []
-            for doc, score in results_with_scores:
-                doc.metadata["score"] = score
-                final_documents.append(doc)
-                print(f"  - Match (Score: {score:.4f}): {doc.page_content[:80]}...")
+        # FIX: Re-process the documents to ensure they have the 'data' field in metadata for mem0.
+        # The parent class correctly populates doc.page_content. We ensure doc.metadata['data'] also has this content.
+        for doc in results:
+            if 'data' not in doc.metadata:
+                doc.metadata['data'] = doc.page_content
+            print(f"  - Match: {doc.page_content[:80]}...")
             
-            return final_documents
-        except Exception as e:
-            print(f"[Wrapper.similarity_search] ERROR in parent search: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            return []
-
+        return results
 
 # --- Initialize services ---
 print("Initializing clients...")
@@ -130,8 +112,8 @@ indexing_policy = {
 # --- Vector store ---
 print("Initializing Azure Cosmos DB for NoSQL Vector Store...")
 
-# FIX: Correctly initialize the vector store with direct keyword arguments.
-# Do NOT use a `vector_search_fields` dictionary.
+# FIX: The constructor does NOT take text_key, embedding_key, etc.
+# These arguments have been removed to fix the TypeError.
 vector_store = CosmosDBMem0Wrapper(
     cosmos_client=cosmos_client,
     database_name=cosmosdb_database_name,
@@ -139,9 +121,6 @@ vector_store = CosmosDBMem0Wrapper(
     embedding=embedder,
     vector_embedding_policy=vector_embedding_policy,
     indexing_policy=indexing_policy,
-    text_key="text",                 # <-- This tells LangChain what field to use for the main text
-    embedding_key="vectorContent",   # <-- This tells LangChain what field holds the vector
-    metadata_key="metadata",         # <-- This tells LangChain what field holds the metadata
 )
 
 print("Vector store initialized successfully.")
