@@ -71,17 +71,26 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         try:
             print("\n[Debug] Starting vector search...")
             
+            # Get the container reference from the parent class
+            container = self.container
+            print(f"[Debug] Got container reference: {container.id}")
+            
             # Try direct vector search first
-            results = self._collection.query_items(
-                query="SELECT * FROM c",
+            query = {
+                "query": "SELECT * FROM c",
+                "parameters": []
+            }
+            
+            results = container.query_items(
+                query=query["query"],
+                parameters=query["parameters"],
                 enable_scan_in_query=True,
                 vector=embedding,
                 top_k=k,
                 vector_fields=[{
                     "path": "/vectorContent",
-                    "distance_type": "CosineDistance"
-                }],
-                parameters=[],
+                    "distance_type": "cosine"
+                }]
             )
             
             # Convert results to list and print debug info
@@ -94,7 +103,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     # Extract or create metadata
                     metadata = {
                         "id": item.get("id") or str(uuid.uuid4()),
-                        "data": item.get("text", ""),  # Use 'text' field as content
+                        "data": item.get("text", "") or item.get("page_content", ""),
                         "score": item.get("_vector_score", 0)
                     }
                     
@@ -102,13 +111,21 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     if "metadata" in item:
                         metadata.update(item["metadata"])
                     
+                    # Get content from various possible fields
+                    content = (
+                        item.get("text", "") or 
+                        item.get("page_content", "") or 
+                        item.get("content", "") or 
+                        metadata.get("data", "")
+                    )
+                    
                     # Create document
                     doc = Document(
-                        page_content=item.get("text", ""),
+                        page_content=content,
                         metadata=metadata
                     )
                     formatted_docs.append(doc)
-                    print(f"[Debug] Processed document: ID={metadata['id']}, Content={doc.page_content[:50]}...")
+                    print(f"[Debug] Processed document: ID={metadata['id']}, Content={content[:50]}...")
                 except Exception as doc_error:
                     print(f"[Debug] Error processing document: {doc_error}")
                     continue
@@ -116,6 +133,8 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             return formatted_docs
         except Exception as e:
             print(f"[Debug] Error in similarity_search_by_vector: {str(e)}")
+            import traceback
+            print(f"[Debug] Full error: {traceback.format_exc()}")
             return []
 
 # --- Initialize services ---
@@ -230,7 +249,10 @@ print("\n[Debug] Running comprehensive vector search test:")
 # Test direct document retrieval
 print("\n1. Testing direct document retrieval:")
 try:
-    results = vector_store._collection.query_items(
+    container = vector_store.container
+    print(f"[Debug] Using container: {container.id}")
+    
+    results = container.query_items(
         query="SELECT * FROM c",
         enable_scan_in_query=True,
         parameters=[],
@@ -238,9 +260,17 @@ try:
     docs = list(results)
     print(f"Found {len(docs)} total documents in collection")
     for doc in docs:
-        print(f"Document: ID={doc.get('id')}, Text={doc.get('text', '')[:50]}...")
+        content = (
+            doc.get("text", "") or 
+            doc.get("page_content", "") or 
+            doc.get("content", "") or 
+            doc.get("data", "")
+        )
+        print(f"Document: ID={doc.get('id')}, Text={content[:50]}...")
 except Exception as e:
     print(f"Error in direct retrieval: {str(e)}")
+    import traceback
+    print(f"Full error: {traceback.format_exc()}")
 
 # Test vector search
 print("\n2. Testing vector search:")
