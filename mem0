@@ -33,34 +33,68 @@ cosmosdb_container_name = "mem0"
 class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
     """
     A wrapper for AzureCosmosDBNoSqlVectorSearch to make it fully
-    compatible with mem0. It solves the missing `similarity_search_by_vector`
-    method by providing a stub that allows mem0's `.add()` process to complete.
+    compatible with mem0. Handles proper document formatting and ID management.
     """
+    
+    def add_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: List[dict] | None = None,
+        **kwargs: Any,
+    ) -> List[str]:
+        """Override add_texts to ensure proper ID handling."""
+        if not metadatas:
+            metadatas = [{} for _ in texts]
+            
+        # Ensure each metadata has an ID
+        for metadata in metadatas:
+            if 'id' not in metadata:
+                metadata['id'] = str(uuid.uuid4())
+                
+        # Call parent's add_texts
+        return super().add_texts(texts, metadatas, **kwargs)
+
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
         """Perform similarity search using the vector."""
-        results = self.similarity_search_with_score(
-            query="",  # Empty string instead of None
-            k=k,
-            vector=embedding,
-            **kwargs
-        )
-        # Format documents with proper metadata structure for Mem0
-        formatted_docs = []
-        for doc, score in results:
-            # Ensure the document has the required fields in metadata
-            metadata = doc.metadata.copy() if doc.metadata else {}
-            metadata['data'] = doc.page_content
-            # Ensure we have an ID - either from metadata or generate one
-            if 'id' not in metadata:
-                metadata['id'] = doc.metadata.get('_id') or str(uuid.uuid4())
-            formatted_doc = Document(
-                page_content=doc.page_content,
-                metadata=metadata
+        try:
+            results = self.similarity_search_with_score(
+                query="",  # Empty string instead of None
+                k=k,
+                vector=embedding,
+                **kwargs
             )
-            formatted_docs.append(formatted_doc)
-        return formatted_docs
+            
+            # Format documents with proper metadata structure for Mem0
+            formatted_docs = []
+            for doc, score in results:
+                # Start with original metadata or empty dict
+                metadata = doc.metadata.copy() if doc.metadata else {}
+                
+                # Ensure required fields
+                metadata['data'] = doc.page_content
+                if 'id' not in metadata:
+                    # Try to get ID from various possible locations
+                    metadata['id'] = (
+                        metadata.get('_id') or 
+                        metadata.get('id') or 
+                        metadata.get('document_id') or 
+                        str(uuid.uuid4())
+                    )
+                
+                # Create formatted document
+                formatted_doc = Document(
+                    page_content=doc.page_content,
+                    metadata=metadata
+                )
+                formatted_docs.append(formatted_doc)
+            
+            return formatted_docs
+        except Exception as e:
+            print(f"Error in similarity_search_by_vector: {e}")
+            # Return empty list on error to allow graceful degradation
+            return []
 
 # --- Initialize Clients ---
 print("Initializing clients...")
@@ -89,7 +123,10 @@ vector_embedding_policy = {
     ]
 }
 indexing_policy = {
-    "includedPaths": [{"path": "/*"}],
+    "includedPaths": [
+        {"path": "/*"},
+        {"path": "/metadata/*"}  # Ensure metadata fields are indexed
+    ],
     "excludedPaths": [{"path": '/"_etag"/?'}],
     "vectorIndexes": [
         {"path": "/vectorContent", "type": "quantizedFlat"},
