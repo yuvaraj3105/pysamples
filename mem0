@@ -34,47 +34,88 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         metadatas: List[dict] | None = None,
         **kwargs: Any,
     ) -> List[str]:
+        print("\n[Debug] Adding texts...")
         if not metadatas:
             metadatas = [{} for _ in texts]
 
         formatted_metadatas = []
-        for idx, metadata in enumerate(metadatas):
+        doc_ids = []
+        
+        for idx, (text, metadata) in enumerate(zip(texts, metadatas)):
+            # Create a new metadata dict with required fields
             formatted = metadata.copy()
-            if not formatted.get('id'):
-                formatted['id'] = str(uuid.uuid4())
-            formatted['data'] = texts[idx]
+            doc_id = formatted.get('id') or str(uuid.uuid4())
+            formatted.update({
+                'id': doc_id,
+                'text': text,  # Store as 'text' for vector store
+                'data': text,  # Store as 'data' for Mem0
+                '_id': doc_id  # Backup ID field
+            })
+            
             formatted_metadatas.append(formatted)
+            doc_ids.append(doc_id)
+            print(f"[Debug] Preparing document {idx + 1}: ID={doc_id}, Content={text[:50]}...")
 
-        return super().add_texts(texts, formatted_metadatas, **kwargs)
+        # Call parent's add_texts with our formatted metadata
+        try:
+            result = super().add_texts(texts, formatted_metadatas, **kwargs)
+            print(f"[Debug] Successfully added {len(doc_ids)} documents")
+            return doc_ids
+        except Exception as e:
+            print(f"[Debug] Error in add_texts: {str(e)}")
+            return []
 
     def similarity_search_by_vector(
-        self, embedding: List[float], k: int = 10, **kwargs: Any  # ⬅️ Increased k
+        self, embedding: List[float], k: int = 10, **kwargs: Any
     ) -> List[Document]:
         try:
-            docs = self.similarity_search(
-                query="",
-                k=k,
-                search_type="similarity",
+            print("\n[Debug] Starting vector search...")
+            
+            # Try direct vector search first
+            results = self._collection.query_items(
+                query="SELECT * FROM c",
+                enable_scan_in_query=True,
                 vector=embedding,
-                **kwargs
+                top_k=k,
+                vector_fields=[{
+                    "path": "/vectorContent",
+                    "distance_type": "CosineDistance"
+                }],
+                parameters=[],
             )
-
+            
+            # Convert results to list and print debug info
+            docs_list = list(results)
+            print(f"[Debug] Found {len(docs_list)} results")
+            
             formatted_docs = []
-            for doc in docs:
-                metadata = doc.metadata.copy() if doc.metadata else {}
-                if not metadata.get("id"):
-                    metadata["id"] = str(uuid.uuid4())
-                metadata["data"] = doc.page_content
-
-                formatted_doc = Document(
-                    page_content=doc.page_content,
-                    metadata=metadata
-                )
-                formatted_docs.append(formatted_doc)
-
+            for item in docs_list:
+                try:
+                    # Extract or create metadata
+                    metadata = {
+                        "id": item.get("id") or str(uuid.uuid4()),
+                        "data": item.get("text", ""),  # Use 'text' field as content
+                        "score": item.get("_vector_score", 0)
+                    }
+                    
+                    # Add any additional metadata
+                    if "metadata" in item:
+                        metadata.update(item["metadata"])
+                    
+                    # Create document
+                    doc = Document(
+                        page_content=item.get("text", ""),
+                        metadata=metadata
+                    )
+                    formatted_docs.append(doc)
+                    print(f"[Debug] Processed document: ID={metadata['id']}, Content={doc.page_content[:50]}...")
+                except Exception as doc_error:
+                    print(f"[Debug] Error processing document: {doc_error}")
+                    continue
+            
             return formatted_docs
         except Exception as e:
-            print(f"Error in similarity_search_by_vector: {e}")
+            print(f"[Debug] Error in similarity_search_by_vector: {str(e)}")
             return []
 
 # --- Initialize services ---
@@ -183,10 +224,36 @@ print("\nSearching for memories...")
 search_results = m.search("What movies does the user like?", user_id="alice")
 print("Search results:", search_results)
 
-# --- Direct Vector Search Debug (optional) ---
-print("\n[Debug] Direct vector search test:")
+# --- Direct Vector Search Debug ---
+print("\n[Debug] Running comprehensive vector search test:")
+
+# Test direct document retrieval
+print("\n1. Testing direct document retrieval:")
+try:
+    results = vector_store._collection.query_items(
+        query="SELECT * FROM c",
+        enable_scan_in_query=True,
+        parameters=[],
+    )
+    docs = list(results)
+    print(f"Found {len(docs)} total documents in collection")
+    for doc in docs:
+        print(f"Document: ID={doc.get('id')}, Text={doc.get('text', '')[:50]}...")
+except Exception as e:
+    print(f"Error in direct retrieval: {str(e)}")
+
+# Test vector search
+print("\n2. Testing vector search:")
 query = "What movies does the user like?"
-query_embedding = embedder.embed_query(query)
-results = vector_store.similarity_search_by_vector(query_embedding, k=10)
-for doc in results:
-    print("Matched:", doc.metadata.get("data"))
+try:
+    query_embedding = embedder.embed_query(query)
+    print("Generated query embedding successfully")
+    
+    results = vector_store.similarity_search_by_vector(query_embedding, k=10)
+    print(f"\nFound {len(results)} results via vector search")
+    for doc in results:
+        print(f"Match (score={doc.metadata.get('score', 'N/A')}):")
+        print(f"  ID: {doc.metadata.get('id', 'N/A')}")
+        print(f"  Content: {doc.page_content[:100]}...")
+except Exception as e:
+    print(f"Error in vector search test: {str(e)}")
