@@ -51,25 +51,6 @@ from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 from langchain_core.documents import Document
 
-# Monkey-patch the base class so mem0 always finds the correct get_all and memories
-from langchain_azure_ai.vectorstores.azure_cosmos_db_no_sql import AzureCosmosDBNoSqlVectorSearch
-AzureCosmosDBNoSqlVectorSearch.get_all = CosmosDBMem0Wrapper.get_all
-AzureCosmosDBNoSqlVectorSearch.memories = CosmosDBMem0Wrapper.memories
-
-# --- Load environment ---
-load_dotenv()
-
-# --- Config variables ---
-azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
-azure_openai_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
-azure_openai_embedding_deployment_name = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME")
-cosmosdb_endpoint = os.getenv("AZURE_COSMOSDB_ENDPOINT")
-cosmosdb_database_name = os.getenv("AZURE_COSMOSDB_DATABASE_NAME")
-cosmosdb_container_name = "mem0"
-EMBEDDING_DIMENSIONS = 1536
-
 # --- Wrapper Class ---
 class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
     """
@@ -256,6 +237,25 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             print(traceback.format_exc())
             return []
 
+
+# Monkey-patch the base class so mem0 always finds the correct get_all and memories
+from langchain_azure_ai.vectorstores.azure_cosmos_db_no_sql import AzureCosmosDBNoSqlVectorSearch
+AzureCosmosDBNoSqlVectorSearch.get_all = CosmosDBMem0Wrapper.get_all
+AzureCosmosDBNoSqlVectorSearch.memories = CosmosDBMem0Wrapper.memories
+
+# --- Load environment ---
+load_dotenv()
+
+# --- Config variables ---
+azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+azure_openai_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+azure_openai_embedding_deployment_name = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME")
+cosmosdb_endpoint = os.getenv("AZURE_COSMOSDB_ENDPOINT")
+cosmosdb_database_name = os.getenv("AZURE_COSMOSDB_DATABASE_NAME")
+cosmosdb_container_name = "mem0"
+EMBEDDING_DIMENSIONS = 1536
 
 # --- Initialize services ---
 print("Initializing clients...")
