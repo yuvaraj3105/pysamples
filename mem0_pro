@@ -1,0 +1,356 @@
+"""
+azure_openai_mem0_cosmodb_try1.py
+----------------------------------
+
+A conversational chatbot using Azure OpenAI (via LangChain), Mem0 for advanced memory management, and Azure CosmosDB as the vector store backend.
+
+Features:
+- Interactive chat loop with persistent memory for each user
+- CosmosDB-backed long-term memory (vector search)
+- Advanced memory management commands:
+    /memories                - List all memories for the current user
+    /search <keyword>        - Search memories for the current user by keyword
+    /update <id> <content>   - Update a memory by its ID (will prompt for new context)
+    /delete <id>             - Delete a memory by its ID
+    /history                 - Show the current session's chat history (from mem0)
+    /clear_history           - Clear all memories for the user
+    exit                     - Quit the chatbot
+- Each user/assistant exchange is stored as a single memory
+- Detailed logging and debugging for memory and vector store operations
+
+Usage:
+    python azure_openai_mem0_cosmodb_try1.py --user-name alice
+
+Environment variables required (can be set in .env):
+- AZURE_OPENAI_API_KEY
+- AZURE_OPENAI_ENDPOINT
+- AZURE_OPENAI_DEPLOYMENT_NAME
+- AZURE_OPENAI_API_VERSION
+- AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME
+- AZURE_COSMOSDB_ENDPOINT
+- AZURE_COSMOSDB_DATABASE_NAME
+
+Required Python dependencies:
+    pip install langchain-azure-ai mem0 langchain-openai azure-cosmos azure-identity python-dotenv
+
+"""
+import os
+import uuid
+import json
+import argparse
+import traceback
+from typing import Any, List, Iterable
+from dotenv import load_dotenv
+
+from langchain_azure_ai.vectorstores import AzureCosmosDBNoSqlVectorSearch
+from mem0 import Memory
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+from langchain_core.documents import Document
+
+# --- Wrapper Class ---
+class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
+    """
+    A wrapper to add detailed debugging and ensure compatibility with mem0.
+    """
+    def add_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: List[dict] | None = None,
+        **kwargs: Any,
+    ) -> List[str]:
+        """
+        Overrides add_texts to inject required metadata fields for mem0 and add debug prints.
+        """
+        texts_list = list(texts)
+        filtered = [(i, t) for i, t in enumerate(texts_list) if t and t.strip()]
+        if not filtered:
+            print("[Wrapper.add_texts] Skipping call: all texts were empty or whitespace.")
+            return []
+
+        print(f"\n[Wrapper.add_texts] Intercepted call to add {len(filtered)} texts.")
+        
+        if not metadatas:
+            metadatas = [{} for _ in texts_list]
+            
+        filtered_texts = [t for _, t in filtered]
+        filtered_metadatas = [metadatas[i] for i, _ in filtered]
+        
+        formatted_metadatas = []
+        doc_ids = []
+        for idx, (text, metadata) in enumerate(zip(filtered_texts, filtered_metadatas)):
+            formatted = metadata.copy()
+            doc_id = formatted.get('id') or str(uuid.uuid4())
+            formatted.update({
+                'id': doc_id,
+                'text': text,
+                'data': text, 
+            })
+            formatted_metadatas.append(formatted)
+            doc_ids.append(doc_id)
+            print(f"[Wrapper.add_texts] Preparing document {idx + 1}: ID={doc_id}, Content='{text[:60]}...'")
+
+        try:
+            # Use super() to call the parent class's method
+            result_ids = super().add_texts(filtered_texts, formatted_metadatas, **kwargs)
+            print(f"[Wrapper.add_texts] Successfully added {len(result_ids)} documents.")
+            return result_ids
+        except Exception as e:
+            print(f"[Wrapper.add_texts] ERROR: {e}")
+            print(traceback.format_exc())
+            return []
+
+    def get_all(self, *args, **kwargs) -> list:
+        """
+        Retrieves all documents from the container, formatted for mem0.
+        """
+        print("[Wrapper.get_all] Called")
+        try:
+            results = self._container.query_items(
+                query="SELECT * FROM c",
+                enable_cross_partition_query=True,
+                parameters=[],
+            )
+            docs = list(results)
+            formatted = []
+            for doc in docs:
+                memory_text = doc.get('text') or doc.get('data')
+                formatted.append({
+                    "id": doc.get("id"),
+                    "memory": memory_text,
+                    "metadata": doc.get("metadata", {}),
+                })
+            return formatted
+        except Exception as e:
+            print(f"[Wrapper.get_all] ERROR: {e}")
+            print(traceback.format_exc())
+            return []
+
+    @property
+    def memories(self):
+        print("[Wrapper.memories] Property accessed")
+        return self.get_all()
+
+    def similarity_search(
+        self, query: str, k: int = 4, **kwargs: Any
+    ) -> List[Document]:
+        """
+        Overrides similarity_search to add debugging and ensure format compatibility.
+        """
+        print(f"\n[Wrapper.similarity_search] Intercepted search with k={k}, query='{query[:60]}...'")
+        try:
+            results = super().similarity_search(query, k=k, **kwargs)
+            print(f"[Wrapper.similarity_search] Parent method returned {len(results)} results.")
+            
+            # Ensure results are correctly formatted for mem0
+            for doc in results:
+                doc.metadata["id"] = str(doc.metadata.get("id") or uuid.uuid4())
+                setattr(doc, "id", doc.metadata["id"])
+                doc.metadata["data"] = doc.page_content
+                print("-" * 60)
+                print(f"Match: (id={doc.metadata['id']})\nContent: {doc.page_content[:100]}")
+            print("-" * 60)
+            
+            return results
+        except Exception as e:
+            print(f"[Wrapper.similarity_search] ERROR: {e}")
+            print(traceback.format_exc())
+            return []
+
+
+# --- FIX: Monkey-patch AFTER the class is defined ---
+AzureCosmosDBNoSqlVectorSearch.get_all = CosmosDBMem0Wrapper.get_all
+AzureCosmosDBNoSqlVectorSearch.memories = CosmosDBMem0Wrapper.memories
+
+
+# --- Load environment ---
+load_dotenv()
+
+# --- Config variables ---
+azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+azure_openai_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+azure_openai_embedding_deployment_name = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME")
+cosmosdb_endpoint = os.getenv("AZURE_COSMOSDB_ENDPOINT")
+cosmosdb_database_name = os.getenv("AZURE_COSMOSDB_DATABASE_NAME")
+cosmosdb_container_name = "mem0"
+EMBEDDING_DIMENSIONS = 1536
+
+# --- Initialize services ---
+print("Initializing clients...")
+
+embedder = AzureOpenAIEmbeddings(
+    azure_deployment=azure_openai_embedding_deployment_name,
+    openai_api_version=azure_openai_api_version,
+    azure_endpoint=azure_openai_endpoint,
+    api_key=azure_openai_api_key
+)
+
+llm = AzureChatOpenAI(
+    azure_deployment=azure_openai_deployment_name,
+    api_version=azure_openai_api_version,
+    azure_endpoint=azure_openai_endpoint,
+    api_key=azure_openai_api_key,
+)
+
+credential = DefaultAzureCredential()
+cosmos_client = CosmosClient(url=cosmosdb_endpoint, credential=credential)
+
+vector_embedding_policy = {
+    "vectorEmbeddings": [
+        {"path": "/vectorContent", "dataType": "float32", "dimensions": EMBEDDING_DIMENSIONS, "distanceFunction": "cosine"},
+    ]
+}
+
+indexing_policy = {
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [{"path": '/"_etag"/?'}],
+    "vectorIndexes": [{"path": "/vectorContent", "type": "quantizedFlat"}],
+}
+
+# --- Vector store ---
+print("Initializing Azure Cosmos DB for NoSQL Vector Store...")
+
+# FIX: Initialize the vector store with direct keyword arguments.
+vector_store = CosmosDBMem0Wrapper(
+    cosmos_client=cosmos_client,
+    database_name=cosmosdb_database_name,
+    container_name=cosmosdb_container_name,
+    embedding=embedder,
+    vector_embedding_policy=vector_embedding_policy,
+    indexing_policy=indexing_policy,
+    text_key="text",
+    embedding_key="vectorContent",
+    metadata_key="metadata",
+)
+
+print("Vector store initialized successfully.")
+
+# --- Mem0 Config ---
+config = {
+    "vector_store": {
+        "provider": "langchain",
+        "config": {"client": vector_store},
+    },
+    "llm": {
+        "provider": "langchain",
+        "config": {"model": llm},
+    },
+    "embedder": {
+        "provider": "langchain",
+        "config": {"model": embedder},
+    },
+}
+
+# --- Mem0 Setup ---
+print("\nInitializing Mem0 from config...")
+m = Memory.from_config(config)
+print("Mem0 initialized.")
+
+
+# --- Chatbot Interactive Loop ---
+def main():
+    parser = argparse.ArgumentParser(description="Azure OpenAI + Mem0 Chatbot (CosmosDB)")
+    parser.add_argument('--user-name', type=str, default='default_user', help='Username for the chat session')
+    args = parser.parse_args()
+    user_id = args.user_name
+
+    print(f"\nSimple Azure OpenAI + Mem0 Chatbot. User: '{user_id}' (type 'exit' to quit)")
+    print("Available commands: /memories, /search <q>, /update <id> <new>, /delete <id>, /history, /clear_history")
+
+    while True:
+        user_input = input("You: ").strip()
+        if not user_input:
+            continue
+        
+        if user_input.lower() == "exit":
+            print("Goodbye!")
+            break
+            
+        elif user_input.lower() == "/memories":
+            result = m.get_all(user_id=user_id)
+            if not result:
+                print("No memories found for this user.")
+            else:
+                print(f"Found {len(result)} memories:")
+                for i, mem in enumerate(result, 1):
+                    print(f"{i}. ID: {mem.get('id', 'N/A')} | Content: {mem.get('memory', 'N/A')}")
+            continue
+            
+        elif user_input.lower().startswith("/search "):
+            keyword = user_input[8:].strip()
+            if not keyword:
+                print("Usage: /search <keyword>")
+                continue
+            result = m.search(keyword, user_id=user_id)
+            if not result:
+                print("No matching memories found.")
+            else:
+                print(f"Found {len(result)} matching memories:")
+                for i, mem in enumerate(result, 1):
+                    print(f"{i}. ID: {mem.get('id', 'N/A')} | Content: {mem.get('memory', 'N/A')} | Score: {mem.get('score', 'N/A')}")
+            continue
+
+        elif user_input.lower().startswith("/update "):
+            parts = user_input.split(maxsplit=2)
+            if len(parts) < 3:
+                print("Usage: /update <memory_id> <new_content>")
+                continue
+            memory_id, new_content = parts[1], parts[2]
+            try:
+                # FIX: Added user_id to the update call
+                m.update(memory_id, {"data": new_content}, user_id=user_id)
+                print(f"Memory {memory_id} updated.")
+            except Exception as e:
+                print(f"Error updating memory: {e}")
+            continue
+            
+        elif user_input.lower().startswith("/delete "):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print("Usage: /delete <memory_id>")
+                continue
+            memory_id = parts[1]
+            try:
+                # FIX: Added user_id to the delete call
+                m.delete(memory_id, user_id=user_id)
+                print(f"Memory {memory_id} deleted.")
+            except Exception as e:
+                print(f"Error deleting memory: {e}")
+            continue
+            
+        elif user_input.lower() == "/history":
+            history = m.history(user_id=user_id)
+            if not history:
+                print("No conversation history found for this user.")
+            else:
+                print("Conversation history:")
+                for msg in history:
+                    print(f"- {msg['role'].capitalize()}: {msg['content']}")
+            continue
+            
+        elif user_input.lower() == "/clear_history":
+            confirm = input(f"Are you sure you want to delete ALL memories for user '{user_id}'? (y/n): ").strip().lower()
+            if confirm == "y":
+                try:
+                    m.delete_all(user_id=user_id)
+                    print("All memories for this user have been deleted.")
+                except Exception as e:
+                    print(f"Error clearing memories: {e}")
+            else:
+                print("Operation cancelled.")
+            continue
+
+        # REFACTOR: Use m.chat() for a streamlined conversation flow.
+        # This automatically handles memory search, prompt augmentation, and storing the new exchange.
+        try:
+            response = m.chat(user_input, user_id=user_id)
+            print("Bot:", response)
+        except Exception as e:
+            print(f"An error occurred while getting the response: {e}")
+            print(traceback.format_exc())
+
+if __name__ == "__main__":
+    main()
