@@ -120,8 +120,8 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
 
     def get_all(self, *args, **kwargs) -> list:
         """
-        Returns all documents in the CosmosDB container as a list of dicts.
-        This is required for mem0's get_all functionality.
+        Returns all documents in the CosmosDB container as a list of dicts
+        formatted for mem0 (with at least 'id' and 'memory' fields).
         """
         try:
             results = self._container.query_items(
@@ -130,7 +130,22 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                 parameters=[],
             )
             docs = list(results)
-            return docs
+            formatted = []
+            for doc in docs:
+                # Try to extract the main memory content
+                memory_text = (
+                    doc.get('memory') or
+                    doc.get('text') or
+                    doc.get('data') or
+                    doc.get('page_content') or
+                    (doc.get('metadata', {}).get('data') if doc.get('metadata') else "")
+                )
+                formatted.append({
+                    "id": doc.get("id"),
+                    "memory": memory_text,
+                    "metadata": doc.get("metadata", {}),
+                })
+            return formatted
         except Exception as e:
             print(f"[Wrapper.get_all] ERROR: {e}")
             import traceback
