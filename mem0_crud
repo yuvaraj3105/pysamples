@@ -113,7 +113,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             print(f"[Wrapper.add_texts] Successfully added {len(doc_ids)} documents")
             if not doc_ids:
                 print("[Wrapper.add_texts] No new documents were added (possibly due to duplicates).")
-            return doc_ids
+            return doc_ids if doc_ids is not None else []
         except Exception as e:
             print(f"[Wrapper.add_texts] Error in add_texts: {str(e)}")
             return []
@@ -152,7 +152,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     print("-" * 60)
                     print(f"Match: (id={doc.metadata['id']})\n{doc.page_content[:100]}")
                 print("-" * 60)
-                return filtered_results
+                return filtered_results if filtered_results is not None else []
             except NotImplementedError:
                 print("[Wrapper.similarity_search] super().similarity_search not implemented. Falling back to Cosmos DB SDK.")
                 # Fallback: Use Cosmos DB SDK for vector search
@@ -208,7 +208,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                     print("-" * 60)
                     print(f"Match: (id={doc.metadata['id']})\n{doc.page_content[:100]}")
                 print("-" * 60)
-                return filtered_docs
+                return filtered_docs if filtered_docs is not None else []
         except Exception as e:
             print(f"[Wrapper.similarity_search] ERROR in parent search: {str(e)}")
             import traceback
