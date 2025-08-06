@@ -51,6 +51,11 @@ from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 from langchain_core.documents import Document
 
+# Monkey-patch the base class so mem0 always finds the correct get_all and memories
+from langchain_azure_ai.vectorstores.azure_cosmos_db_no_sql import AzureCosmosDBNoSqlVectorSearch
+AzureCosmosDBNoSqlVectorSearch.get_all = CosmosDBMem0Wrapper.get_all
+AzureCosmosDBNoSqlVectorSearch.memories = CosmosDBMem0Wrapper.memories
+
 # --- Load environment ---
 load_dotenv()
 
