@@ -283,7 +283,19 @@ def debug_print_all_documents(container, label=None):
         print(f"Found {len(docs)} total documents in collection")
         for doc in docs:
             print("-" * 60)
-            print(json.dumps(doc, indent=2, ensure_ascii=False))
+            # Only print the most relevant fields
+            doc_id = doc.get('id')
+            text = doc.get('text') or doc.get('data') or doc.get('page_content') or ""
+            metadata = doc.get('metadata', {})
+            # Show a short vector preview if present
+            vector = doc.get('vectorContent')
+            vector_preview = f"[{', '.join(str(round(x, 4)) for x in vector[:3])}...]" if vector else None
+            print(f"ID: {doc_id}")
+            print(f"Text: {text}")
+            if metadata:
+                print(f"Metadata: {json.dumps({k: metadata.get(k) for k in ('category','user_id','created_at','id','hash') if k in metadata}, indent=2)}")
+            if vector_preview:
+                print(f"Vector (preview): {vector_preview}")
         print("-" * 60)
     except Exception as e:
         print(f"Error in direct retrieval: {str(e)}")
