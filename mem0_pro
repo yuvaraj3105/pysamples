@@ -96,11 +96,11 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             doc_ids.append(doc_id)
             print(f"[Wrapper.add_texts] Preparing document {idx + 1}: ID={doc_id}, Content={text[:50]}...")
         try:
-            result = super().add_texts(filtered_texts, formatted_metadatas, **kwargs)
-            print(f"[Wrapper.add_texts] Successfully added {len(doc_ids)} documents")
-            if not doc_ids:
-                print("[Wrapper.add_texts] No new documents were added (possibly due to duplicates).")
-            return doc_ids if doc_ids is not None else []
+            # FIX: Capture and return the actual IDs from the superclass method.
+            # This is crucial for langchain/mem0 to track state correctly and fixes the root cause.
+            result_ids = super().add_texts(filtered_texts, formatted_metadatas, **kwargs)
+            print(f"[Wrapper.add_texts] Successfully added {len(result_ids)} documents")
+            return result_ids if result_ids is not None else []
         except Exception as e:
             print(f"[Wrapper.add_texts] Error in add_texts: {str(e)}")
             return []
@@ -133,6 +133,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         except Exception as e:
             print(f"[Wrapper.get_all] ERROR: {e}")
             print(traceback.format_exc())
+            # FIX: Ensure an empty list is returned on error, not None.
             return []
 
     @property
@@ -236,7 +237,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             print(traceback.format_exc())
             return []
 
-# *** FIX: Moved this block to after the class definition to resolve NameError ***
+
 # Monkey-patch the base class so mem0 always finds the correct get_all and memories
 AzureCosmosDBNoSqlVectorSearch.get_all = CosmosDBMem0Wrapper.get_all
 AzureCosmosDBNoSqlVectorSearch.memories = CosmosDBMem0Wrapper.memories
@@ -371,106 +372,110 @@ print("Simple Azure OpenAI + Mem0 Chatbot (type 'exit' to quit)")
 history = []
 
 while True:
-    user_input = input("You: ").strip()
-    if user_input.lower() == "exit":
-        print("Goodbye!")
-        break
-    if user_input.lower() == "/memories":
-        # Retrieve all memories for the user
-        result = m.get_all(user_id=user_id)
-        memories = result["results"] if isinstance(result, dict) and "results" in result else result
-        if not memories:
-            print("No memories found for this user.")
-        else:
-            print(f"Found {len(memories)} memories:")
-            for i, mem in enumerate(memories, 1):
-                print(f"{i}. ID: {mem.get('id', 'N/A')} | Content: {mem.get('memory', 'N/A')} | Context: {mem.get('metadata', {}).get('context', 'N/A') if mem.get('metadata') else 'N/A'}")
-        debug_print_all_documents(vector_store._container, label="after /memories")
-        continue
-    if user_input.lower().startswith("/search "):
-        keyword = user_input[8:].strip()
-        if not keyword:
-            print("Usage: /search <keyword>")
+    try:
+        user_input = input("You: ").strip()
+        if user_input.lower() == "exit":
+            print("Goodbye!")
+            break
+        if user_input.lower() == "/memories":
+            # Retrieve all memories for the user
+            result = m.get_all(user_id=user_id)
+            memories = result["results"] if isinstance(result, dict) and "results" in result else result
+            if not memories:
+                print("No memories found for this user.")
+            else:
+                print(f"Found {len(memories)} memories:")
+                for i, mem in enumerate(memories, 1):
+                    print(f"{i}. ID: {mem.get('id', 'N/A')} | Content: {mem.get('memory', 'N/A')} | Context: {mem.get('metadata', {}).get('context', 'N/A') if mem.get('metadata') else 'N/A'}")
+            debug_print_all_documents(vector_store._container, label="after /memories")
             continue
-        result = m.search(keyword, user_id=user_id)
-        matches = result["results"] if isinstance(result, dict) and "results" in result else result
-        if not matches:
-            print("No matching memories found.")
-        else:
-            print(f"Found {len(matches)} matching memories:")
-            for i, mem in enumerate(matches, 1):
-                print(f"{i}. ID: {mem.get('id', 'N/A')} | Content: {mem.get('memory', 'N/A')} | Context: {mem.get('metadata', {}).get('context', 'N/A') if mem.get('metadata') else 'N/A'}")
-        debug_print_all_documents(vector_store._container, label="after /search")
-        continue
-    if user_input.lower().startswith("/update "):
-        parts = user_input.split(maxsplit=2)
-        if len(parts) < 3:
-            print("Usage: /update <memory_id> <new_content>")
+        if user_input.lower().startswith("/search "):
+            keyword = user_input[8:].strip()
+            if not keyword:
+                print("Usage: /search <keyword>")
+                continue
+            result = m.search(keyword, user_id=user_id)
+            matches = result["results"] if isinstance(result, dict) and "results" in result else result
+            if not matches:
+                print("No matching memories found.")
+            else:
+                print(f"Found {len(matches)} matching memories:")
+                for i, mem in enumerate(matches, 1):
+                    print(f"{i}. ID: {mem.get('id', 'N/A')} | Content: {mem.get('memory', 'N/A')} | Context: {mem.get('metadata', {}).get('context', 'N/A') if mem.get('metadata') else 'N/A'}")
+            debug_print_all_documents(vector_store._container, label="after /search")
             continue
-        memory_id, new_content = parts[1], parts[2]
-        new_context = input("Enter new context for this memory: ").strip()
-        update_data = {"data": new_content, "context": new_context}
-        try:
-            m.update(memory_id, update_data)
-            print(f"Memory {memory_id} updated.")
-        except Exception as e:
-            print(f"Error updating memory: {e}")
-        debug_print_all_documents(vector_store._container, label="after update")
-        continue
-    if user_input.lower().startswith("/delete "):
-        parts = user_input.split(maxsplit=1)
-        if len(parts) < 2:
-            print("Usage: /delete <memory_id>")
+        if user_input.lower().startswith("/update "):
+            parts = user_input.split(maxsplit=2)
+            if len(parts) < 3:
+                print("Usage: /update <memory_id> <new_content>")
+                continue
+            memory_id, new_content = parts[1], parts[2]
+            new_context = input("Enter new context for this memory: ").strip()
+            update_data = {"data": new_content, "context": new_context}
+            try:
+                m.update(memory_id, update_data)
+                print(f"Memory {memory_id} updated.")
+            except Exception as e:
+                print(f"Error updating memory: {e}")
+            debug_print_all_documents(vector_store._container, label="after update")
             continue
-        memory_id = parts[1]
-        try:
-            m.delete(memory_id)
-            print(f"Memory {memory_id} deleted.")
-        except Exception as e:
-            print(f"Error deleting memory: {e}")
-        debug_print_all_documents(vector_store._container, label="after delete")
-        continue
-    if user_input.lower() == "/history":
-        if not history:
-            print("No conversation history in this session.")
-        else:
-            print("Current session chat history:")
-            for i, msg in enumerate(history, 1):
-                print(f"{i}. {msg['role'].capitalize()}: {msg['content']}")
-        debug_print_all_documents(vector_store._container, label="after /history")
-        continue
-    if user_input.lower() == "/clear_history":
-        confirm = input("Are you sure you want to clear the current session's chat history? (y/n): ").strip().lower()
-        if confirm == "y":
-            history.clear()
-            print("Session chat history cleared.")
-            # Optionally, prompt to clear all memories as well
-            clear_mem = input("Also clear all memories for this user? (y/n): ").strip().lower()
-            if clear_mem == "y":
-                try:
-                    m.delete_all(user_id=user_id)
-                    print("All memories for this user have been deleted.")
-                except Exception as e:
-                    print(f"Error clearing memories: {e}")
-                debug_print_all_documents(vector_store._container, label="after /clear_history (delete_all)")
-        else:
-            print("Clear history cancelled.")
-        debug_print_all_documents(vector_store._container, label="after /clear_history")
-        continue
-    # Add the user message to the history
-    history.append({"role": "user", "content": user_input})
-    # Add the message to memory
-    m.add([{ "role": "user", "content": user_input }], user_id=user_id)
-    # Get the LLM response using the actual LangChain LLM object
-    response_msg = llm.invoke(history)
-    # Extract the content from the AIMessage object if needed
-    response = response_msg.content if hasattr(response_msg, 'content') else str(response_msg)
-    # Add the assistant's response to the history
-    history.append({"role": "assistant", "content": response})
-    # Add the user+assistant pair as a single memory
-    conversation_turn = [
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": response}
-    ]
-    m.add(conversation_turn, user_id=user_id)
-    print("Bot:", response)
+        if user_input.lower().startswith("/delete "):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print("Usage: /delete <memory_id>")
+                continue
+            memory_id = parts[1]
+            try:
+                m.delete(memory_id)
+                print(f"Memory {memory_id} deleted.")
+            except Exception as e:
+                print(f"Error deleting memory: {e}")
+            debug_print_all_documents(vector_store._container, label="after delete")
+            continue
+        if user_input.lower() == "/history":
+            if not history:
+                print("No conversation history in this session.")
+            else:
+                print("Current session chat history:")
+                for i, msg in enumerate(history, 1):
+                    print(f"{i}. {msg['role'].capitalize()}: {msg['content']}")
+            debug_print_all_documents(vector_store._container, label="after /history")
+            continue
+        if user_input.lower() == "/clear_history":
+            confirm = input("Are you sure you want to clear the current session's chat history? (y/n): ").strip().lower()
+            if confirm == "y":
+                history.clear()
+                print("Session chat history cleared.")
+                # Optionally, prompt to clear all memories as well
+                clear_mem = input("Also clear all memories for this user? (y/n): ").strip().lower()
+                if clear_mem == "y":
+                    try:
+                        m.delete_all(user_id=user_id)
+                        print("All memories for this user have been deleted.")
+                    except Exception as e:
+                        print(f"Error clearing memories: {e}")
+                    debug_print_all_documents(vector_store._container, label="after /clear_history (delete_all)")
+            else:
+                print("Clear history cancelled.")
+            debug_print_all_documents(vector_store._container, label="after /clear_history")
+            continue
+        # Add the user message to the history
+        history.append({"role": "user", "content": user_input})
+        # Add the message to memory
+        m.add([{ "role": "user", "content": user_input }], user_id=user_id)
+        # Get the LLM response using the actual LangChain LLM object
+        response_msg = llm.invoke(history)
+        # Extract the content from the AIMessage object if needed
+        response = response_msg.content if hasattr(response_msg, 'content') else str(response_msg)
+        # Add the assistant's response to the history
+        history.append({"role": "assistant", "content": response})
+        # Add the user+assistant pair as a single memory
+        conversation_turn = [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": response}
+        ]
+        m.add(conversation_turn, user_id=user_id)
+        print("Bot:", response)
+    except Exception as e:
+        print(f"\nAn unexpected error occurred in the main loop: {e}")
+        print(traceback.format_exc())
