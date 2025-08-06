@@ -119,10 +119,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             return []
 
     def get_all(self, *args, **kwargs) -> list:
-        """
-        Returns all documents in the CosmosDB container as a list of dicts
-        formatted for mem0 (with at least 'id' and 'memory' fields).
-        """
+        print("[Wrapper.get_all] Called")
         try:
             results = self._container.query_items(
                 query="SELECT * FROM c",
@@ -151,6 +148,11 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             import traceback
             print(traceback.format_exc())
             return []
+
+    @property
+    def memories(self):
+        print("[Wrapper.memories] Property accessed")
+        return self.get_all()
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 10, **kwargs: Any
