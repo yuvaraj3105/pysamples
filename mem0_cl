@@ -127,22 +127,26 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             docs = list(results)
             print(f"[Wrapper.get_all] Found {len(docs)} documents")
             
-            # Return the raw documents as mem0 expects them
-            # mem0 will handle the filtering internally
+            # Return the documents in the format mem0 expects
             formatted = []
             for doc in docs:
-                # Create a simplified document structure that mem0 can understand
+                # Use the metadata.id if available, otherwise use doc.id
+                memory_id = doc.get("metadata", {}).get("id") or doc.get("id")
+                
+                # Create a document structure that mem0 can understand
                 formatted_doc = {
-                    "id": doc.get("id"),
+                    "id": memory_id,  # Use the correct ID that mem0 generated
                     "text": doc.get("text", ""),
                     "metadata": doc.get("metadata", {}),
                     # Include other fields that might be needed
                     "page_content": doc.get("text", ""),
                     "vectorContent": doc.get("vectorContent", [])
                 }
+                
+                print(f"[Wrapper.get_all] Document: CosmosID={doc.get('id')}, MemoryID={memory_id}, Text={doc.get('text', '')[:50]}")
                 formatted.append(formatted_doc)
             
-            print(f"[Wrapper.get_all] Returning {len(formatted)} raw documents")
+            print(f"[Wrapper.get_all] Returning {len(formatted)} documents")
             return formatted
             
         except Exception as e:
