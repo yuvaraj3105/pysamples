@@ -109,12 +109,54 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             print(f"[Wrapper.add_texts] Error in add_texts: {str(e)}")
             return []
 
-    def get_all(self, user_id: str = None, *args, **kwargs) -> list:
+    def get_all(self, *args, **kwargs) -> list:
         """
-        Get all memories, optionally filtered by user_id.
+        Get all memories for mem0 compatibility.
         This method must return a list, never None.
+        Note: mem0 calls this without user_id parameter.
         """
-        print(f"[Wrapper.get_all] Called with user_id={user_id}")
+        print(f"[Wrapper.get_all] Called with args={args}, kwargs={kwargs}")
+        try:
+            # Get all documents from the container
+            results = self._container.query_items(
+                query="SELECT * FROM c",
+                enable_cross_partition_query=True,
+                parameters=[],
+            )
+            
+            docs = list(results)
+            print(f"[Wrapper.get_all] Found {len(docs)} documents")
+            
+            # Return the raw documents as mem0 expects them
+            # mem0 will handle the filtering internally
+            formatted = []
+            for doc in docs:
+                # Create a simplified document structure that mem0 can understand
+                formatted_doc = {
+                    "id": doc.get("id"),
+                    "text": doc.get("text", ""),
+                    "metadata": doc.get("metadata", {}),
+                    # Include other fields that might be needed
+                    "page_content": doc.get("text", ""),
+                    "vectorContent": doc.get("vectorContent", [])
+                }
+                formatted.append(formatted_doc)
+            
+            print(f"[Wrapper.get_all] Returning {len(formatted)} raw documents")
+            return formatted
+            
+        except Exception as e:
+            print(f"[Wrapper.get_all] ERROR: {e}")
+            print(traceback.format_exc())
+            # Always return an empty list, never None
+            return []
+
+    def get_all_memories(self, user_id: str = None) -> list:
+        """
+        Get all memories with proper formatting for display.
+        This is used by our chatbot interface, not by mem0 internals.
+        """
+        print(f"[Wrapper.get_all_memories] Called with user_id={user_id}")
         try:
             # Build query based on user_id filter
             if user_id:
@@ -131,7 +173,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             )
             
             docs = list(results)
-            print(f"[Wrapper.get_all] Found {len(docs)} documents")
+            print(f"[Wrapper.get_all_memories] Found {len(docs)} documents")
             
             formatted = []
             for doc in docs:
@@ -147,7 +189,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                 # Extract metadata
                 metadata = doc.get('metadata', {})
                 
-                # Format the memory object as expected by mem0
+                # Format the memory object as expected by our interface
                 memory_obj = {
                     "id": doc.get("id"),
                     "memory": memory_text,
@@ -158,13 +200,12 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                 }
                 formatted.append(memory_obj)
             
-            print(f"[Wrapper.get_all] Returning {len(formatted)} formatted memories")
+            print(f"[Wrapper.get_all_memories] Returning {len(formatted)} formatted memories")
             return formatted
             
         except Exception as e:
-            print(f"[Wrapper.get_all] ERROR: {e}")
+            print(f"[Wrapper.get_all_memories] ERROR: {e}")
             print(traceback.format_exc())
-            # Always return an empty list, never None
             return []
 
     @property
@@ -463,16 +504,9 @@ while True:
             break
             
         if user_input.lower() == "/memories":
-            # Retrieve all memories for the user
+            # Retrieve all memories for the user using our custom method
             try:
-                result = m.get_all(user_id=user_id)
-                # Handle different return formats
-                if isinstance(result, dict):
-                    memories = result.get("results", [])
-                elif isinstance(result, list):
-                    memories = result
-                else:
-                    memories = []
+                memories = vector_store.get_all_memories(user_id=user_id)
                 
                 if not memories:
                     print("No memories found for this user.")
@@ -572,14 +606,8 @@ while True:
                 clear_mem = input("Also clear all memories for this user? (y/n): ").strip().lower()
                 if clear_mem == "y":
                     try:
-                        # Get all memories for the user first
-                        all_memories = m.get_all(user_id=user_id)
-                        if isinstance(all_memories, dict):
-                            memories_list = all_memories.get("results", [])
-                        elif isinstance(all_memories, list):
-                            memories_list = all_memories
-                        else:
-                            memories_list = []
+                        # Get all memories for the user using our custom method
+                        memories_list = vector_store.get_all_memories(user_id=user_id)
                         
                         # Delete each memory individually
                         deleted_count = 0
