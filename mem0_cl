@@ -327,6 +327,90 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             print(traceback.format_exc())
             return False
 
+    def get_by_ids(self, ids: List[str], **kwargs) -> List[Document]:
+        """
+        Get documents by their IDs. Required by mem0 for update operations.
+        """
+        print(f"[Wrapper.get_by_ids] Getting documents by IDs: {ids}")
+        
+        documents = []
+        for doc_id in ids:
+            try:
+                # Read document from Cosmos DB
+                doc = self._container.read_item(item=doc_id, partition_key=doc_id)
+                
+                # Extract content and metadata
+                content = (
+                    doc.get("text") or 
+                    doc.get("data") or 
+                    doc.get("content") or 
+                    doc.get("page_content") or
+                    ""
+                )
+                
+                metadata = doc.get("metadata", {})
+                metadata["id"] = doc_id
+                
+                # Create LangChain Document
+                document = Document(
+                    page_content=content,
+                    metadata=metadata
+                )
+                
+                # Ensure the document has the required attributes
+                setattr(document, "id", doc_id)
+                document.metadata["data"] = content
+                
+                documents.append(document)
+                print(f"[Wrapper.get_by_ids] Found document: {doc_id}, content: {content[:50]}")
+                
+            except Exception as e:
+                print(f"[Wrapper.get_by_ids] Document {doc_id} not found: {e}")
+                # Continue to next ID rather than failing completely
+                continue
+        
+        print(f"[Wrapper.get_by_ids] Returning {len(documents)} documents")
+        return documents
+
+    def get(self, vector_id: str, **kwargs) -> Document:
+        """
+        Get a single document by its ID. Alternative method that mem0 might call.
+        """
+        print(f"[Wrapper.get] Getting document by ID: {vector_id}")
+        
+        try:
+            # Read document from Cosmos DB
+            doc = self._container.read_item(item=vector_id, partition_key=vector_id)
+            
+            # Extract content and metadata
+            content = (
+                doc.get("text") or 
+                doc.get("data") or 
+                doc.get("content") or 
+                doc.get("page_content") or
+                ""
+            )
+            
+            metadata = doc.get("metadata", {})
+            metadata["id"] = vector_id
+            
+            # Create LangChain Document
+            document = Document(
+                page_content=content,
+                metadata=metadata
+            )
+            
+            # Ensure the document has the required attributes
+            setattr(document, "id", vector_id)
+            document.metadata["data"] = content
+            
+            print(f"[Wrapper.get] Found document: {vector_id}, content: {content[:50]}")
+            return document
+            
+        except Exception as e:
+            print(f"[Wrapper.get] Document {vector_id} not found: {e}")
+            raise ValueError(f"Document with ID {vector_id} not found")
+
     def delete(self, ids: List[str], **kwargs) -> bool:
         """
         Improved delete method with better error handling.
@@ -666,7 +750,15 @@ def main():
 
     print(f"\n=== Azure OpenAI + Mem0 Chatbot (CosmosDB) ===")
     print(f"User: {user_id}")
-    print("Commands: /memories, /search <term>, /update <id> <content>, /delete <id>, /history, /clear_history, exit")
+    print("Commands:")
+    print("  /memories              - List all memories for current user")
+    print("  /search <term>         - Search memories by keyword")
+    print("  /get <id>              - Get a specific memory by ID") 
+    print("  /update <id> <content> - Update a memory by ID")
+    print("  /delete <id>           - Delete a memory by ID")
+    print("  /history               - Show current session chat history")
+    print("  /clear_history         - Clear session history")
+    print("  exit                   - Quit the chatbot")
     print("=" * 60)
     
     history = []
@@ -691,14 +783,20 @@ def main():
                             memory_content = mem.get('memory', 'N/A')
                             memory_id = mem.get('id', 'N/A')
                             created_at = mem.get('metadata', {}).get('created_at', 'N/A')
+                            user_id_mem = mem.get('metadata', {}).get('user_id', 'N/A')
                             print(f"{i}. ID: {memory_id}")
                             print(f"   Content: {memory_content}")
+                            print(f"   User: {user_id_mem}")
                             print(f"   Created: {created_at}")
                             print()
+                            
+                    # Also show direct CosmosDB query for debugging
+                    print("\n--- Direct CosmosDB Debug Info ---")
+                    debug_print_all_documents(vector_store._container, label="current memories")
+                        
                 except Exception as e:
                     print(f"Error retrieving memories: {e}")
                     print(traceback.format_exc())
-                debug_print_all_documents(vector_store._container, label="after /memories")
                 continue
                 
             if user_input.lower().startswith("/search "):
@@ -707,12 +805,8 @@ def main():
                     print("Usage: /search <keyword>")
                     continue
                 try:
-                    # Try different search method signatures
-                    try:
-                        result = m.search(keyword, user_id=user_id)
-                    except TypeError:
-                        # Fallback: try without user_id
-                        result = m.search(keyword)
+                    # Use safe mem0 call for search
+                    result = safe_mem0_call(m.search, keyword, user_id=user_id)
                     
                     # Handle different return formats
                     if isinstance(result, dict):
@@ -737,6 +831,27 @@ def main():
                     print(traceback.format_exc())
                 continue
                 
+            if user_input.lower().startswith("/get "):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) < 2:
+                    print("Usage: /get <memory_id>")
+                    continue
+                memory_id = parts[1]
+                try:
+                    # Test the get_by_ids method directly
+                    docs = vector_store.get_by_ids([memory_id])
+                    if docs:
+                        doc = docs[0]
+                        print(f"Found memory {memory_id}:")
+                        print(f"Content: {doc.page_content}")
+                        print(f"Metadata: {doc.metadata}")
+                    else:
+                        print(f"Memory {memory_id} not found")
+                except Exception as e:
+                    print(f"Error getting memory {memory_id}: {e}")
+                    print(traceback.format_exc())
+                continue
+                
             if user_input.lower().startswith("/update "):
                 parts = user_input.split(maxsplit=2)
                 if len(parts) < 3:
@@ -745,8 +860,8 @@ def main():
                 memory_id, new_content = parts[1], parts[2]
                 
                 try:
-                    # Use mem0's update method (without user_id parameter)
-                    m.update(memory_id, new_content)
+                    # Use safe mem0 call for update (without user_id as it caused the error)
+                    safe_mem0_call(m.update, memory_id, new_content)
                     print(f"Memory {memory_id} updated successfully.")
                 except Exception as e:
                     print(f"Error updating memory: {e}")
