@@ -61,8 +61,7 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
 
     def get_by_ids(self, ids: List[str], **kwargs: Any) -> List[Document]:
         """
-        Get documents by their IDs.
-        Required by mem0 for update operations.
+        Get documents by their IDs with improved error handling and format conversion.
         """
         print(f"[Wrapper.get_by_ids] Getting documents with IDs: {ids}")
         
@@ -82,18 +81,26 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
                         ""
                     )
                     
-                    # Build metadata
-                    metadata = item.get("metadata", {}).copy()
+                    # Build metadata with required mem0 fields
+                    metadata = item.get("metadata", {}).copy() if item.get("metadata") else {}
                     metadata.update({
                         "id": doc_id,
                         "memory_id": doc_id,
+                        "data": content,  # Required by mem0
+                        "payload": {      # Required by mem0
+                            "data": content,
+                            "metadata": metadata
+                        }
                     })
                     
-                    # Create Document object
+                    # Create Document object with required format
                     doc = Document(
                         page_content=content,
                         metadata=metadata
                     )
+                    # Add payload attribute required by mem0
+                    setattr(doc, "payload", metadata["payload"])
+                    
                     documents.append(doc)
                     print(f"[Wrapper.get_by_ids] Found document {doc_id}")
                     
@@ -108,7 +115,71 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
             print(f"[Wrapper.get_by_ids] Error: {str(e)}")
             print(traceback.format_exc())
             return []
-    
+
+    def update_document(self, doc_id: str, data: Dict[str, Any]) -> bool:
+        """
+        Improved update method with better error handling and proper mem0 format.
+        """
+        print(f"[Wrapper.update_document] Updating {doc_id} with data: {data}")
+        
+        try:
+            # Get existing document
+            try:
+                existing_doc = self._container.read_item(item=doc_id, partition_key=doc_id)
+                print(f"[Wrapper.update_document] Found existing document: {doc_id}")
+            except Exception as read_error:
+                print(f"[Wrapper.update_document] Document {doc_id} not found: {read_error}")
+                return False
+            
+            # Handle different data formats
+            if isinstance(data, str):
+                content = data
+            elif isinstance(data, dict):
+                content = (
+                    data.get('data') or 
+                    data.get('text') or 
+                    data.get('content') or 
+                    data.get('page_content') or 
+                    existing_doc.get('text', '')
+                )
+            else:
+                print(f"[Wrapper.update_document] Unsupported data type: {type(data)}")
+                return False
+            
+            # Update all content fields for consistency
+            existing_doc['text'] = content
+            existing_doc['data'] = content
+            existing_doc['content'] = content
+            existing_doc['page_content'] = content
+            
+            # Ensure metadata exists
+            if 'metadata' not in existing_doc:
+                existing_doc['metadata'] = {}
+            
+            # Update metadata with required mem0 fields
+            existing_doc['metadata'].update({
+                'updated_at': datetime.utcnow().isoformat(),
+                'data': content,
+                'payload': {
+                    'data': content,
+                    'metadata': existing_doc['metadata']
+                }
+            })
+            
+            # If data is a dict with metadata, merge it
+            if isinstance(data, dict) and 'metadata' in data:
+                existing_doc['metadata'].update(data['metadata'])
+            
+            # Replace document in container
+            result = self._container.replace_item(item=doc_id, body=existing_doc)
+            print(f"[Wrapper.update_document] Successfully updated {doc_id}")
+            return True
+            
+        except Exception as e:
+            print(f"[Wrapper.update_document] Error updating {doc_id}: {e}")
+            print(traceback.format_exc())
+            return False
+            
     def add_texts(
         self,
         texts: Iterable[str],
@@ -322,67 +393,6 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
         print("[Wrapper.memories] Property accessed")
         return self.get_all()
 
-    def update_document(self, doc_id: str, data: Dict[str, Any]) -> bool:
-        """
-        Improved update method with proper error handling and content management.
-        """
-        print(f"[Wrapper.update_document] Updating {doc_id} with data: {data}")
-        
-        try:
-            # Get existing document
-            try:
-                existing_doc = self._container.read_item(item=doc_id, partition_key=doc_id)
-                print(f"[Wrapper.update_document] Found existing document: {doc_id}")
-            except Exception as read_error:
-                print(f"[Wrapper.update_document] Document {doc_id} not found: {read_error}")
-                return False
-            
-            # Handle different data formats
-            if isinstance(data, str):
-                # String data = direct content update
-                content = data
-            elif isinstance(data, dict):
-                # Dict data might contain content in different fields
-                content = (
-                    data.get('data') or 
-                    data.get('text') or 
-                    data.get('content') or 
-                    data.get('page_content') or 
-                    existing_doc.get('text', '')  # Fallback to existing content
-                )
-            else:
-                print(f"[Wrapper.update_document] Unsupported data type: {type(data)}")
-                return False
-            
-            # Update all content fields for consistency
-            existing_doc['text'] = content
-            existing_doc['data'] = content
-            existing_doc['content'] = content
-            existing_doc['page_content'] = content
-            
-            # Ensure metadata exists
-            if 'metadata' not in existing_doc:
-                existing_doc['metadata'] = {}
-            
-            # Update metadata
-            existing_doc['metadata'].update({
-                'updated_at': datetime.utcnow().isoformat(),
-                'data': content,  # Keep content in metadata too
-            })
-            
-            # If data is a dict with metadata, merge it
-            if isinstance(data, dict) and 'metadata' in data:
-                existing_doc['metadata'].update(data['metadata'])
-            
-            # Replace document in container
-            result = self._container.replace_item(item=doc_id, body=existing_doc)
-            print(f"[Wrapper.update_document] Successfully updated {doc_id}")
-            return True
-            
-        except Exception as e:
-            print(f"[Wrapper.update_document] Error updating {doc_id}: {e}")
-            print(traceback.format_exc())
-            return False
     def delete(self, ids: List[str], **kwargs) -> bool:
         """
         Improved delete method with better error handling.
