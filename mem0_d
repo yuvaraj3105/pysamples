@@ -61,60 +61,65 @@ class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
 
     def get_by_ids(self, ids: List[str], **kwargs: Any) -> List[Document]:
         """
-        Get documents by their IDs with improved error handling and format conversion.
+        Get documents by their IDs with improved error handling and fallback to query.
+        Always returns a list of the same length as ids, with None for missing docs.
         """
         print(f"[Wrapper.get_by_ids] Getting documents with IDs: {ids}")
-        
-        try:
-            documents = []
-            for doc_id in ids:
+        documents = []
+        for doc_id in ids:
+            doc = None
+            # Try direct read
+            try:
+                item = self._container.read_item(item=doc_id, partition_key=doc_id)
+                doc = self._cosmos_item_to_document(item, doc_id)
+                print(f"[Wrapper.get_by_ids] Found document {doc_id} via read_item")
+            except Exception as e:
+                print(f"[Wrapper.get_by_ids] read_item failed for {doc_id}: {e}")
+                # Fallback: try query
                 try:
-                    # Read document directly using container's read_item
-                    item = self._container.read_item(item=doc_id, partition_key=doc_id)
-                    
-                    # Extract text content from various possible fields
-                    content = (
-                        item.get("text") or 
-                        item.get("data") or 
-                        item.get("content") or 
-                        item.get("page_content") or 
-                        ""
-                    )
-                    
-                    # Build metadata with required mem0 fields
-                    metadata = item.get("metadata", {}).copy() if item.get("metadata") else {}
-                    metadata.update({
-                        "id": doc_id,
-                        "memory_id": doc_id,
-                        "data": content,  # Required by mem0
-                        "payload": {      # Required by mem0
-                            "data": content,
-                            "metadata": metadata
-                        }
-                    })
-                    
-                    # Create Document object with required format
-                    doc = Document(
-                        page_content=content,
-                        metadata=metadata
-                    )
-                    # Add payload attribute required by mem0
-                    setattr(doc, "payload", metadata["payload"])
-                    
-                    documents.append(doc)
-                    print(f"[Wrapper.get_by_ids] Found document {doc_id}")
-                    
-                except Exception as e:
-                    print(f"[Wrapper.get_by_ids] Error retrieving document {doc_id}: {e}")
-                    continue
-            
-            print(f"[Wrapper.get_by_ids] Retrieved {len(documents)}/{len(ids)} documents")
-            return documents
-            
-        except Exception as e:
-            print(f"[Wrapper.get_by_ids] Error: {str(e)}")
-            print(traceback.format_exc())
-            return []
+                    query = "SELECT * FROM c WHERE c.id = @id"
+                    parameters = [{"name": "@id", "value": doc_id}]
+                    results = list(self._container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        enable_cross_partition_query=True,
+                    ))
+                    if results:
+                        doc = self._cosmos_item_to_document(results[0], doc_id)
+                        print(f"[Wrapper.get_by_ids] Found document {doc_id} via query")
+                    else:
+                        print(f"[Wrapper.get_by_ids] No document found for {doc_id} via query")
+                except Exception as e2:
+                    print(f"[Wrapper.get_by_ids] Query fallback failed for {doc_id}: {e2}")
+            documents.append(doc)
+        print(f"[Wrapper.get_by_ids] Returning {len([d for d in documents if d is not None])}/{len(ids)} documents")
+        return documents
+
+    def _cosmos_item_to_document(self, item, doc_id):
+        # Extract text content from various possible fields
+        content = (
+            item.get("text") or 
+            item.get("data") or 
+            item.get("content") or 
+            item.get("page_content") or 
+            ""
+        )
+        metadata = item.get("metadata", {}).copy() if item.get("metadata") else {}
+        metadata.update({
+            "id": doc_id,
+            "memory_id": doc_id,
+            "data": content,
+            "payload": {
+                "data": content,
+                "metadata": metadata
+            }
+        })
+        doc = Document(
+            page_content=content,
+            metadata=metadata
+        )
+        setattr(doc, "payload", metadata["payload"])
+        return doc
 
     def update_document(self, doc_id: str, data: Dict[str, Any]) -> bool:
         """
