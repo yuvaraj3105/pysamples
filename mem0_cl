@@ -470,9 +470,40 @@ def debug_print_all_documents(container, label=None):
         print(f"Error in direct retrieval: {str(e)}")
 
 
+def safe_mem0_call(method, *args, **kwargs):
+    """
+    Safely call mem0 methods with fallbacks for different method signatures.
+    """
+    method_name = method.__name__ if hasattr(method, '__name__') else str(method)
+    print(f"[Mem0] Calling {method_name} with args={args}, kwargs={kwargs}")
+    
+    try:
+        # Try the call with all provided arguments
+        result = method(*args, **kwargs)
+        print(f"[Mem0] {method_name} succeeded with full arguments")
+        return result
+    except TypeError as e:
+        if "unexpected keyword argument" in str(e):
+            print(f"[Mem0] {method_name} failed with kwargs, trying without kwargs: {e}")
+            try:
+                # Try without keyword arguments
+                result = method(*args)
+                print(f"[Mem0] {method_name} succeeded without kwargs")
+                return result
+            except Exception as e2:
+                print(f"[Mem0] {method_name} failed completely: {e2}")
+                raise e2
+        else:
+            print(f"[Mem0] {method_name} failed with TypeError: {e}")
+            raise e
+    except Exception as e:
+        print(f"[Mem0] {method_name} failed: {e}")
+        raise e
+
+
 def handle_user_input(user_input, user_id, m, llm, history):
     """
-    Improved input handling with better memory management.
+    Improved input handling with better memory management and safe mem0 calls.
     """
     try:
         print(f"\n[Chat] Processing input from user: {user_id}")
@@ -483,12 +514,12 @@ def handle_user_input(user_input, user_id, m, llm, history):
         
         # Add to memory - let mem0 handle the storage
         print(f"[Chat] Adding user message to memory")
-        m.add(user_input, user_id=user_id)
+        safe_mem0_call(m.add, user_input, user_id=user_id)
         
         # Get relevant memories for context
         print(f"[Chat] Searching for relevant memories")
         try:
-            relevant_memories = m.search(user_input, user_id=user_id, limit=3)
+            relevant_memories = safe_mem0_call(m.search, user_input, user_id=user_id, limit=3)
             print(f"[Chat] Found relevant memories: {type(relevant_memories)}")
         except Exception as search_error:
             print(f"[Chat] Error searching memories: {search_error}")
@@ -676,7 +707,13 @@ def main():
                     print("Usage: /search <keyword>")
                     continue
                 try:
-                    result = m.search(keyword, user_id=user_id)
+                    # Try different search method signatures
+                    try:
+                        result = m.search(keyword, user_id=user_id)
+                    except TypeError:
+                        # Fallback: try without user_id
+                        result = m.search(keyword)
+                    
                     # Handle different return formats
                     if isinstance(result, dict):
                         matches = result.get("results", [])
@@ -708,8 +745,8 @@ def main():
                 memory_id, new_content = parts[1], parts[2]
                 
                 try:
-                    # Use mem0's update method
-                    m.update(memory_id, new_content, user_id=user_id)
+                    # Use mem0's update method (without user_id parameter)
+                    m.update(memory_id, new_content)
                     print(f"Memory {memory_id} updated successfully.")
                 except Exception as e:
                     print(f"Error updating memory: {e}")
