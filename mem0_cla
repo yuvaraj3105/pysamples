@@ -1,0 +1,1167 @@
+  """
+azure_openai_mem0_cosmodb_try1_claude.py
+----------------------------------------
+
+A conversational chatbot using Azure OpenAI (via LangChain), Mem0 for advanced memory management, 
+and Azure CosmosDB as the vector store backend.
+
+WORK IN PROGRESS - Enhanced wrapper with ID synchronization and debugging capabilities.
+
+Working Features:
+- ✅ Interactive chat loop with basic conversation
+- ✅ CosmosDB-backed memory storage
+- ✅ Memory listing with dual ID display (Mem0 ID + CosmosDB ID)
+- ✅ Enhanced debugging and logging
+- ✅ ID mapping cache between Mem0 and CosmosDB
+- ✅ Multiple document retrieval strategies with fallbacks
+
+Working Commands:
+    /memories                - List all memories for current user (✅ WORKING)
+    /history                 - Show current session history (✅ WORKING)
+    /debug                   - Show debug information (✅ WORKING)
+    /cleanup                 - Clear stale mem0 metadata cache (✅ WORKING)
+    /clear_history           - Clear session history (✅ WORKING)
+    exit                     - Quit the chatbot (✅ WORKING)
+
+Known Issues (❌ BROKEN):
+    /search <keyword>        - Memory search fails due to vector search issues
+    /update <mem0_id> <content> - Update fails due to document retrieval issues
+    /delete <mem0_id>        - Delete may fail due to document retrieval issues
+    - Memory context in conversations not working properly
+    - Stale metadata cleanup not fully effective
+    - Document conversion errors in retrieval strategies
+
+Technical Implementation:
+- Enhanced CosmosDBMem0Wrapper extending AzureCosmosDBNoSqlVectorSearch
+- Bidirectional ID mapping (Mem0 ID ↔ CosmosDB ID)
+- 4-strategy document retrieval with fallbacks
+- Proper payload structure for Mem0 compatibility
+- Comprehensive error handling and debugging logs
+
+Usage:
+    python azure_openai_mem0_cosmodb_try1_claude.py --user-name alice
+
+Environment variables required (can be set in .env):
+- AZURE_OPENAI_API_KEY
+- AZURE_OPENAI_ENDPOINT
+- AZURE_OPENAI_DEPLOYMENT_NAME
+- AZURE_OPENAI_API_VERSION
+- AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME
+- AZURE_COSMOSDB_ENDPOINT
+- AZURE_COSMOSDB_DATABASE_NAME
+
+Note: This is a development version with extensive logging for debugging.
+Some features may not work as expected due to ongoing integration issues.
+"""
+
+import os
+import uuid
+from typing import Any, List, Iterable, Dict
+from dotenv import load_dotenv
+import json
+import argparse
+import traceback
+from datetime import datetime, timezone
+
+# Required:
+# pip install -U langchain-azure-ai mem0 langchain-openai azure-cosmos azure-identity python-dotenv
+
+from langchain_azure_ai.vectorstores import AzureCosmosDBNoSqlVectorSearch
+from mem0 import Memory
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+from langchain_core.documents import Document
+
+
+class CosmosDBMem0Wrapper(AzureCosmosDBNoSqlVectorSearch):
+    """
+    Enhanced wrapper with ID synchronization between Mem0 and CosmosDB.
+    
+    Features:
+    1. Bidirectional ID mapping cache (Mem0 ID ↔ CosmosDB ID)
+    2. Multi-strategy document retrieval with fallbacks
+    3. Enhanced error handling and debugging
+    4. Mem0-compatible payload structure
+    5. Memory listing and management capabilities
+    
+    Known Issues:
+    - Document retrieval sometimes fails due to conversion errors
+    - Vector search implementation needs refinement
+    - Stale metadata cleanup not fully effective
+    
+    Working Methods:
+    - get_all() / get_all_memories() - ✅ List memories
+    - add_texts() - ✅ Add new memories
+    - delete() - ✅ Delete memories (basic)
+    
+    Problematic Methods:
+    - get_by_ids() - ❌ Document retrieval issues
+    - update_document() - ❌ Depends on get_by_ids
+    - similarity_search_by_vector() - ❌ Vector search issues
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # In-memory cache for ID mappings to handle mismatches
+        self._id_mapping = {}  # mem0_id -> cosmos_id
+        self._reverse_mapping = {}  # cosmos_id -> mem0_id
+        print("[Wrapper] Initialized with ID mapping cache")
+
+    def _add_id_mapping(self, mem0_id: str, cosmos_id: str):
+        """Add ID mapping to cache."""
+        self._id_mapping[mem0_id] = cosmos_id
+        self._reverse_mapping[cosmos_id] = mem0_id
+        print(f"[Wrapper] Added ID mapping: {mem0_id} <-> {cosmos_id}")
+
+    def _get_cosmos_id(self, mem0_id: str) -> str:
+        """Get CosmosDB ID from Mem0 ID, with fallback."""
+        # First check cache
+        if mem0_id in self._id_mapping:
+            return self._id_mapping[mem0_id]
+        
+        # Fallback: assume they're the same (for new documents)
+        return mem0_id
+
+    def get_by_ids(self, ids: List[str], **kwargs: Any) -> List[Document]:
+        """
+        Enhanced get_by_ids with multiple fallback strategies and ID mapping.
+        """
+        print(f"\n[Wrapper.get_by_ids] Retrieving documents with IDs: {ids}")
+        documents = []
+        
+        for mem0_id in ids:
+            doc = None
+            
+            # Strategy 1: Try with original ID
+            try:
+                print(f"[Wrapper.get_by_ids] Strategy 1 - Direct read with ID: {mem0_id}")
+                item = self._container.read_item(item=mem0_id, partition_key=mem0_id)
+                doc = self._cosmos_item_to_document(item, mem0_id)
+                self._add_id_mapping(mem0_id, mem0_id)
+                print(f"[Wrapper.get_by_ids] ✓ Strategy 1 succeeded for {mem0_id}")
+                
+            except Exception as e1:
+                # Only show brief error for NotFound, full error for others
+                if "NotFound" in str(e1):
+                    print(f"[Wrapper.get_by_ids] Strategy 1 failed for {mem0_id}: Document not found")
+                else:
+                    print(f"[Wrapper.get_by_ids] Strategy 1 failed for {mem0_id}: {e1}")
+                
+                # Strategy 2: Try with mapped ID from cache
+                cosmos_id = self._get_cosmos_id(mem0_id)
+                if cosmos_id != mem0_id:
+                    try:
+                        print(f"[Wrapper.get_by_ids] Strategy 2 - Using mapped ID: {cosmos_id}")
+                        item = self._container.read_item(item=cosmos_id, partition_key=cosmos_id)
+                        doc = self._cosmos_item_to_document(item, mem0_id)
+                        print(f"[Wrapper.get_by_ids] ✓ Strategy 2 succeeded for {mem0_id}")
+                        
+                    except Exception as e2:
+                        if "NotFound" in str(e2):
+                            print(f"[Wrapper.get_by_ids] Strategy 2 failed for {mem0_id}: Document not found")
+                        else:
+                            print(f"[Wrapper.get_by_ids] Strategy 2 failed for {mem0_id}: {e2}")
+                
+                # Strategy 3: Query by ID in all possible fields
+                if doc is None:
+                    try:
+                        print(f"[Wrapper.get_by_ids] Strategy 3 - Query by ID in multiple fields")
+                        # First try to find by metadata.memory_id
+                        query = "SELECT * FROM c WHERE c.metadata.memory_id = @id"
+                        parameters = [{"name": "@id", "value": mem0_id}]
+                        results = list(self._container.query_items(
+                            query=query,
+                            parameters=parameters,
+                            enable_cross_partition_query=True,
+                        ))
+                        
+                        if results:
+                            doc = self._cosmos_item_to_document(results[0], mem0_id)
+                            actual_cosmos_id = results[0].get('id')
+                            self._add_id_mapping(mem0_id, actual_cosmos_id)
+                            print(f"[Wrapper.get_by_ids] ✓ Strategy 3 succeeded for {mem0_id}")
+                        else:
+                            print(f"[Wrapper.get_by_ids] Strategy 3 - No results for {mem0_id}")
+                            
+                    except Exception as e3:
+                        print(f"[Wrapper.get_by_ids] Strategy 3 failed for {mem0_id}: {e3}")
+                
+                # Strategy 4: Search by content hash if available
+                if doc is None:
+                    try:
+                        print(f"[Wrapper.get_by_ids] Strategy 4 - Search by metadata patterns")
+                        # Try to find by any field that might contain our ID
+                        query = "SELECT * FROM c WHERE CONTAINS(TOSTRING(c), @id)"
+                        parameters = [{"name": "@id", "value": mem0_id}]
+                        results = list(self._container.query_items(
+                            query=query,
+                            parameters=parameters,
+                            enable_cross_partition_query=True,
+                        ))
+                        
+                        for result in results:
+                            # Check if this result actually matches our criteria
+                            result_str = json.dumps(result, default=str).lower()
+                            if mem0_id.lower() in result_str:
+                                doc = self._cosmos_item_to_document(result, mem0_id)
+                                actual_cosmos_id = result.get('id')
+                                self._add_id_mapping(mem0_id, actual_cosmos_id)
+                                print(f"[Wrapper.get_by_ids] ✓ Strategy 4 succeeded for {mem0_id}")
+                                break
+                                
+                    except Exception as e4:
+                        print(f"[Wrapper.get_by_ids] Strategy 4 failed for {mem0_id}: Search failed")
+            
+            if doc is None:
+                print(f"[Wrapper.get_by_ids] ✗ All strategies failed for {mem0_id} - document may not exist")
+            
+            # Only append non-None documents to avoid issues downstream
+            if doc is not None:
+                documents.append(doc)
+        
+        found_count = len([d for d in documents if d is not None])
+        print(f"[Wrapper.get_by_ids] Final result: {found_count}/{len(ids)} documents found")
+        
+        # If no documents found and this looks like a stale mem0 metadata issue, 
+        # return empty list to prevent downstream errors
+        if found_count == 0 and len(ids) == 1:
+            stale_id = ids[0]
+            print(f"[Wrapper.get_by_ids] Detected stale mem0 metadata for ID: {stale_id}")
+            return []
+        
+        return documents
+
+    def _cosmos_item_to_document(self, item: dict, requested_id: str) -> Document:
+        """
+        Convert CosmosDB item to LangChain Document with correct mem0 payload structure.
+        """
+        print(f"[Wrapper._cosmos_item_to_document] Converting item for ID: {requested_id}")
+        
+        # Extract content from various possible fields
+        content = (
+            item.get("text") or 
+            item.get("data") or 
+            item.get("content") or 
+            item.get("page_content") or 
+            item.get("memory") or
+            item.get("metadata", {}).get("data") or
+            ""
+        )
+        
+        # Build metadata ensuring all required fields are present
+        metadata = item.get("metadata", {}).copy() if item.get("metadata") else {}
+        
+        # Create the payload structure that mem0 expects
+        payload = {
+            "data": content,
+            "metadata": {
+                "id": requested_id,
+                "memory_id": requested_id,
+                "cosmos_id": item.get("id"),
+                "created_at": item.get("created_at") or metadata.get("created_at", datetime.now(timezone.utc).isoformat()),
+                "updated_at": item.get("updated_at") or metadata.get("updated_at", datetime.now(timezone.utc).isoformat()),
+                "user_id": item.get("user_id") or metadata.get("user_id", "default"),
+                "text": content,
+                "content": content
+            }
+        }
+        
+        # Update metadata with the same information
+        metadata.update(payload["metadata"])
+        
+        # Create document with all required attributes
+        doc = Document(
+            page_content=content,
+            metadata=metadata
+        )
+        
+        # Set required attributes for mem0 compatibility
+        setattr(doc, "id", requested_id)
+        
+        # Create payload object with get method for mem0 compatibility
+        class PayloadDict(dict):
+            def get(self, key, default=None):
+                return super().get(key, default)
+        
+        doc.payload = PayloadDict(payload)
+        
+        print(f"[Wrapper._cosmos_item_to_document] Created document: ID={requested_id}, Content='{content[:50]}...'")
+        print(f"[Wrapper._cosmos_item_to_document] Payload structure: {json.dumps(payload, indent=2)}")
+        
+        return doc
+
+    def add_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: List[dict] | None = None,
+        **kwargs: Any,
+    ) -> List[str]:
+        """
+        Enhanced add_texts with proper ID synchronization.
+        Always preserves Mem0's ID and creates proper mapping.
+        """
+        texts_list = list(texts)
+        
+        # Filter out empty texts
+        filtered = [(i, t) for i, t in enumerate(texts_list) if t and t.strip()]
+        if not filtered:
+            print(f"[Wrapper.add_texts] Skipping: all texts are empty")
+            return []
+        
+        print(f"\n[Wrapper.add_texts] Adding {len(filtered)} texts")
+        
+        # Prepare metadatas
+        if not metadatas:
+            metadatas = [{} for _ in texts_list]
+        
+        filtered_texts = [t for _, t in filtered]
+        filtered_metadatas = [metadatas[i] for i, _ in filtered]
+        
+        formatted_metadatas = []
+        doc_ids = []
+        
+        for idx, (text, metadata) in enumerate(zip(filtered_texts, filtered_metadatas)):
+            formatted = metadata.copy()
+            
+            # CRITICAL: Always use Mem0's provided ID if available
+            mem0_id = formatted.get('id')
+            if mem0_id:
+                # Mem0 provided an ID - use it as both Mem0 ID and CosmosDB ID
+                doc_id = mem0_id
+                cosmos_id = mem0_id
+                self._add_id_mapping(mem0_id, cosmos_id)
+                print(f"[Wrapper.add_texts] Using Mem0 provided ID: {mem0_id}")
+            else:
+                # Generate new ID (rare case)
+                doc_id = str(uuid.uuid4())
+                cosmos_id = doc_id
+                self._add_id_mapping(doc_id, cosmos_id)
+                print(f"[Wrapper.add_texts] Generated new ID: {doc_id}")
+            
+            # Ensure all required fields are consistent
+            formatted.update({
+                'id': cosmos_id,  # CosmosDB document ID
+                'memory_id': mem0_id or doc_id,  # Mem0's ID
+                'text': text,
+                'data': text,
+                'content': text,
+                'page_content': text,
+                'memory': text,
+                'created_at': formatted.get('created_at', datetime.utcnow().isoformat()),
+                'updated_at': datetime.utcnow().isoformat(),
+                'user_id': formatted.get('user_id', 'default'),
+            })
+            
+            formatted_metadatas.append(formatted)
+            doc_ids.append(mem0_id or doc_id)  # Return the Mem0 ID
+            
+            print(f"[Wrapper.add_texts] Document {idx + 1}: Mem0_ID={mem0_id or doc_id}, Cosmos_ID={cosmos_id}, User={formatted['user_id']}")
+        
+        try:
+            # Call parent's add_texts method
+            result_ids = super().add_texts(filtered_texts, formatted_metadatas, **kwargs)
+            
+            if result_ids:
+                print(f"[Wrapper.add_texts] ✓ Parent method returned IDs: {result_ids}")
+                # Update our mappings with the actual returned IDs
+                for i, returned_id in enumerate(result_ids):
+                    if i < len(doc_ids):
+                        expected_mem0_id = doc_ids[i]
+                        self._add_id_mapping(expected_mem0_id, returned_id)
+                return doc_ids  # Always return Mem0 IDs
+            else:
+                print(f"[Wrapper.add_texts] ✓ Using our generated IDs: {doc_ids}")
+                return doc_ids
+                
+        except Exception as e:
+            print(f"[Wrapper.add_texts] ✗ Error: {str(e)}")
+            print(traceback.format_exc())
+            return []
+
+    def update_document(self, doc_id: str, data: Dict[str, Any]) -> bool:
+        """
+        Enhanced update with ID mapping support.
+        """
+        print(f"[Wrapper.update_document] Updating document with Mem0 ID: {doc_id}")
+        
+        # Try to find the actual CosmosDB document
+        cosmos_id = self._get_cosmos_id(doc_id)
+        
+        try:
+            # Try with mapped cosmos ID first
+            try:
+                existing_doc = self._container.read_item(item=cosmos_id, partition_key=cosmos_id)
+                print(f"[Wrapper.update_document] Found document with Cosmos ID: {cosmos_id}")
+            except Exception:
+                # Fallback: try with original ID
+                existing_doc = self._container.read_item(item=doc_id, partition_key=doc_id)
+                cosmos_id = doc_id
+                print(f"[Wrapper.update_document] Found document with original ID: {doc_id}")
+        
+        except Exception as read_error:
+            print(f"[Wrapper.update_document] ✗ Document not found: {read_error}")
+            return False
+        
+        # Extract new content
+        if isinstance(data, str):
+            new_content = data
+        elif isinstance(data, dict):
+            new_content = (
+                data.get('data') or 
+                data.get('text') or 
+                data.get('content') or 
+                data.get('memory') or
+                existing_doc.get('text', '')
+            )
+        else:
+            print(f"[Wrapper.update_document] ✗ Unsupported data type: {type(data)}")
+            return False
+        
+        # Update all content fields consistently
+        existing_doc.update({
+            'text': new_content,
+            'data': new_content,
+            'content': new_content,
+            'page_content': new_content,
+            'memory': new_content,
+            'updated_at': datetime.utcnow().isoformat(),
+        })
+        
+        # Update metadata
+        if 'metadata' not in existing_doc:
+            existing_doc['metadata'] = {}
+        
+        existing_doc['metadata'].update({
+            'id': doc_id,  # Keep Mem0's ID in metadata
+            'memory_id': doc_id,
+            'cosmos_id': cosmos_id,  # Track actual CosmosDB ID
+            'data': new_content,
+            'updated_at': datetime.utcnow().isoformat(),
+        })
+        
+        # Merge additional metadata if provided
+        if isinstance(data, dict) and 'metadata' in data:
+            existing_doc['metadata'].update(data['metadata'])
+        
+        try:
+            # Replace the document using the correct CosmosDB ID
+            self._container.replace_item(item=cosmos_id, body=existing_doc)
+            self._add_id_mapping(doc_id, cosmos_id)
+            print(f"[Wrapper.update_document] ✓ Successfully updated document")
+            return True
+            
+        except Exception as e:
+            print(f"[Wrapper.update_document] ✗ Error updating: {e}")
+            print(traceback.format_exc())
+            return False
+
+    def delete(self, ids: List[str], **kwargs) -> bool:
+        """
+        Enhanced delete with ID mapping support.
+        """
+        print(f"[Wrapper.delete] Deleting {len(ids)} documents: {ids}")
+        
+        success_count = 0
+        for mem0_id in ids:
+            try:
+                # Try to find the correct CosmosDB ID
+                cosmos_id = self._get_cosmos_id(mem0_id)
+                
+                # Try deletion with mapped ID first
+                try:
+                    self._container.delete_item(item=cosmos_id, partition_key=cosmos_id)
+                    print(f"[Wrapper.delete] ✓ Deleted with Cosmos ID: {cosmos_id}")
+                except Exception:
+                    # Fallback: try with original ID
+                    self._container.delete_item(item=mem0_id, partition_key=mem0_id)
+                    print(f"[Wrapper.delete] ✓ Deleted with original ID: {mem0_id}")
+                
+                # Clean up mappings
+                if mem0_id in self._id_mapping:
+                    del self._id_mapping[mem0_id]
+                if cosmos_id in self._reverse_mapping:
+                    del self._reverse_mapping[cosmos_id]
+                
+                success_count += 1
+                
+            except Exception as e:
+                print(f"[Wrapper.delete] ✗ Failed to delete {mem0_id}: {e}")
+        
+        success = success_count == len(ids)
+        print(f"[Wrapper.delete] Result: {success_count}/{len(ids)} deleted")
+        return success
+
+    def get_all(self, *args, **kwargs) -> list:
+        """
+        Enhanced get_all with proper ID mapping and Mem0 format.
+        """
+        print(f"[Wrapper.get_all] Called with args={args}, kwargs={kwargs}")
+        
+        try:
+            # Extract user_id filter
+            user_id = kwargs.get('user_id') or (args[0] if args else None)
+            
+            # Build query
+            if user_id:
+                query = """
+                SELECT * FROM c WHERE 
+                    c.metadata.user_id = @user_id OR 
+                    c.user_id = @user_id
+                """
+                parameters = [{"name": "@user_id", "value": user_id}]
+                print(f"[Wrapper.get_all] Filtering by user_id: {user_id}")
+            else:
+                query = "SELECT * FROM c"
+                parameters = []
+                print(f"[Wrapper.get_all] Getting all documents")
+            
+            results = self._container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
+            )
+            
+            docs = list(results)
+            print(f"[Wrapper.get_all] Found {len(docs)} raw documents")
+            
+            formatted = []
+            for doc in docs:
+                # Get the CosmosDB ID
+                cosmos_id = doc.get("id")
+                if not cosmos_id:
+                    continue
+                
+                # Determine the Mem0 ID (prefer from metadata, fallback to cosmos_id)
+                mem0_id = (
+                    doc.get("metadata", {}).get("memory_id") or
+                    doc.get("memory_id") or
+                    doc.get("metadata", {}).get("id") or
+                    cosmos_id
+                )
+                
+                # Update our mappings
+                self._add_id_mapping(mem0_id, cosmos_id)
+                
+                # Extract memory content
+                memory_text = (
+                    doc.get("text") or 
+                    doc.get("data") or 
+                    doc.get("content") or
+                    doc.get("memory") or
+                    doc.get("page_content") or
+                    doc.get("metadata", {}).get("data") or
+                    ""
+                )
+                
+                if not memory_text.strip():
+                    continue
+                
+                # Build metadata
+                metadata = doc.get("metadata", {}).copy()
+                if not metadata.get("user_id"):
+                    metadata["user_id"] = doc.get("user_id", user_id or "default")
+                
+                metadata.update({
+                    "id": mem0_id,
+                    "memory_id": mem0_id,
+                    "cosmos_id": cosmos_id,
+                })
+                
+                # Create memory object in format Mem0 expects
+                memory_obj = {
+                    "id": mem0_id,  # This is what Mem0 will use for future operations
+                    "memory": memory_text,
+                    "data": memory_text,
+                    "text": memory_text,
+                    "metadata": metadata,
+                }
+                
+                formatted.append(memory_obj)
+                print(f"[Wrapper.get_all] Memory: Mem0_ID={mem0_id}, Cosmos_ID={cosmos_id}, Text='{memory_text[:50]}...'")
+            
+            print(f"[Wrapper.get_all] Returning {len(formatted)} formatted memories")
+            return formatted
+            
+        except Exception as e:
+            print(f"[Wrapper.get_all] ✗ Error: {e}")
+            print(traceback.format_exc())
+            return []
+
+    def get_all_memories(self, user_id: str = None) -> list:
+        """
+        Get all memories for display in chatbot interface.
+        """
+        return self.get_all(user_id=user_id)
+
+    def similarity_search_by_vector(
+        self, embedding: List[float], k: int = 10, **kwargs: Any
+    ) -> List[Document]:
+        """
+        Enhanced vector similarity search with proper ID handling.
+        """
+        print(f"\n[Wrapper.similarity_search_by_vector] Vector search k={k}")
+        
+        try:
+            # Use parent's similarity_search method with embedding parameter
+            results = super().similarity_search(
+                query="",
+                k=k,
+                embedding=embedding,
+                **kwargs
+            )
+            
+            if not results:
+                print(f"[Wrapper.similarity_search_by_vector] No results from parent method")
+                return []
+            
+            # Process results to ensure proper ID mapping
+            processed_results = []
+            for doc in results:
+                cosmos_id = doc.metadata.get("id")
+                if not cosmos_id:
+                    cosmos_id = str(uuid.uuid4())
+                    doc.metadata["id"] = cosmos_id
+                
+                # Determine Mem0 ID
+                mem0_id = (
+                    doc.metadata.get("memory_id") or
+                    doc.metadata.get("cosmos_id") or
+                    cosmos_id
+                )
+                
+                # Update mapping
+                self._add_id_mapping(mem0_id, cosmos_id)
+                
+                # Ensure document has proper content and metadata
+                if doc.page_content and doc.page_content.strip():
+                    doc.metadata.update({
+                        "id": mem0_id,  # Mem0 expects this
+                        "memory_id": mem0_id,
+                        "cosmos_id": cosmos_id,
+                        "data": doc.page_content,
+                    })
+                    
+                    setattr(doc, "id", mem0_id)
+                    processed_results.append(doc)
+            
+            print(f"[Wrapper.similarity_search_by_vector] Returning {len(processed_results)} processed results")
+            return processed_results
+            
+        except Exception as e:
+            print(f"[Wrapper.similarity_search_by_vector] ✗ Error: {e}")
+            print(traceback.format_exc())
+            return []
+
+    @property
+    def memories(self):
+        """Property to get all memories for Mem0 compatibility."""
+        return self.get_all()
+
+
+def safe_mem0_call(method, *args, **kwargs):
+    """
+    Enhanced safe calling of mem0 methods with better error handling.
+    """
+    method_name = getattr(method, '__name__', str(method))
+    print(f"\n[Mem0] Calling {method_name}")
+    
+    try:
+        result = method(*args, **kwargs)
+        print(f"[Mem0] ✓ {method_name} succeeded")
+        return result
+        
+    except TypeError as e:
+        if "unexpected keyword argument" in str(e):
+            print(f"[Mem0] Retrying {method_name} without kwargs")
+            try:
+                result = method(*args)
+                print(f"[Mem0] ✓ {method_name} succeeded without kwargs")
+                return result
+            except Exception as e2:
+                print(f"[Mem0] ✗ {method_name} failed completely: {e2}")
+                raise e2
+        else:
+            raise e
+            
+    except Exception as e:
+        print(f"[Mem0] ✗ {method_name} failed: {e}")
+        raise e
+
+
+def debug_print_all_documents(container, label=None):
+    """Enhanced debug function to print all documents with ID mapping info."""
+    print(f"\n{'='*60}")
+    print(f"[Debug] Document scan" + (f" ({label})" if label else ""))
+    print(f"{'='*60}")
+    
+    try:
+        results = container.query_items(
+            query="SELECT * FROM c",
+            enable_cross_partition_query=True,
+        )
+        docs = list(results)
+        print(f"Total documents in CosmosDB: {len(docs)}")
+        
+        if not docs:
+            print("No documents found.")
+            return
+        
+        for i, doc in enumerate(docs):
+            cosmos_id = doc.get('id', 'N/A')
+            # Extract Mem0 ID using the same logic as get_all method
+            mem0_id = (
+                doc.get('metadata', {}).get('memory_id') or
+                doc.get('memory_id') or
+                doc.get('metadata', {}).get('id') or
+                'N/A'
+            )
+            text = (doc.get('text') or doc.get('data') or doc.get('content') or '')[:50]
+            user_id = doc.get('metadata', {}).get('user_id') or doc.get('user_id', 'N/A')
+            created = doc.get('metadata', {}).get('created_at', 'N/A')
+            
+            print(f"\n--- Document {i+1} ---")
+            print(f"Cosmos ID: {cosmos_id}")
+            print(f"Mem0 ID:   {mem0_id}")
+            print(f"User ID:   {user_id}")
+            print(f"Text:      '{text}...'")
+            print(f"Created:   {created}")
+        
+        print(f"\n{'='*60}")
+        
+    except Exception as e:
+        print(f"Debug scan failed: {e}")
+        print(traceback.format_exc())
+
+
+def handle_user_input(user_input, user_id, m, llm, history):
+    """
+    Enhanced input handling with better memory management and error handling.
+    """
+    try:
+        print(f"\n[Chat] Processing input from user: {user_id}")
+        print(f"[Chat] Input: {user_input}")
+        
+        # Add user message to history
+        history.append({"role": "user", "content": user_input})
+        
+        # Add to memory - let mem0 handle the storage
+        print(f"[Chat] Adding user message to memory")
+        safe_mem0_call(m.add, user_input, user_id=user_id)
+        
+        # Get relevant memories for context
+        print(f"[Chat] Searching for relevant memories")
+        try:
+            relevant_memories = safe_mem0_call(m.search, user_input, user_id=user_id, limit=5)
+            print(f"[Chat] Memory search result type: {type(relevant_memories)}")
+            
+            # Handle different return formats from mem0
+            if isinstance(relevant_memories, dict):
+                memories_list = relevant_memories.get("results", [])
+                print(f"[Chat] Extracted {len(memories_list)} memories from dict results")
+            elif isinstance(relevant_memories, list):
+                memories_list = relevant_memories
+                print(f"[Chat] Using {len(memories_list)} memories from list results")
+            else:
+                memories_list = []
+                print(f"[Chat] No memories found or unexpected format")
+                
+        except Exception as search_error:
+            print(f"[Chat] Error searching memories: {search_error}")
+            memories_list = []
+        
+        # Build context from memories
+        context_parts = []
+        if memories_list:
+            print(f"[Chat] Processing {len(memories_list)} memories for context")
+            for i, memory in enumerate(memories_list):
+                memory_text = (
+                    memory.get('memory') or 
+                    memory.get('data') or 
+                    memory.get('text') or
+                    str(memory) if isinstance(memory, str) else ""
+                )
+                if memory_text and memory_text.strip() and memory_text != user_input:
+                    context_parts.append(f"- {memory_text}")
+                    print(f"[Chat] Added context {i+1}: {memory_text[:100]}...")
+        
+        # Create prompt with context
+        if context_parts:
+            context = "\n".join(context_parts)
+            system_prompt = f"""Based on what you know about the user from previous conversations:
+
+{context}
+
+Current user question: {user_input}
+
+Please provide a helpful response that takes into account the conversation history and context."""
+            print(f"[Chat] Using context with {len(context_parts)} memory items")
+        else:
+            system_prompt = user_input
+            print(f"[Chat] No relevant context found, using direct prompt")
+        
+        # Get LLM response
+        print(f"[Chat] Getting LLM response")
+        response_msg = llm.invoke([{"role": "user", "content": system_prompt}])
+        response = response_msg.content if hasattr(response_msg, 'content') else str(response_msg)
+        
+        # Add assistant response to memory as well
+        print(f"[Chat] Adding assistant response to memory")
+        try:
+            safe_mem0_call(m.add, f"Assistant responded: {response}", user_id=user_id)
+        except Exception as mem_error:
+            print(f"[Chat] Warning: Could not add assistant response to memory: {mem_error}")
+        
+        # Add response to history
+        history.append({"role": "assistant", "content": response})
+        
+        print(f"[Chat] Generated response: {response[:200]}...")
+        return response
+        
+    except Exception as e:
+        print(f"[Chat] ✗ Error in handle_user_input: {e}")
+        print(traceback.format_exc())
+        return "I apologize, but I encountered an error processing your request. Please try again."
+
+
+# --- Load environment ---
+load_dotenv()
+
+# --- Config variables ---
+azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+azure_openai_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+azure_openai_embedding_deployment_name = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME")
+cosmosdb_endpoint = os.getenv("AZURE_COSMOSDB_ENDPOINT")
+cosmosdb_database_name = os.getenv("AZURE_COSMOSDB_DATABASE_NAME")
+cosmosdb_container_name = "mem0"
+EMBEDDING_DIMENSIONS = 1536
+
+def main():
+    # --- Initialize services ---
+    print("🚀 Initializing Azure OpenAI + Mem0 + CosmosDB Chatbot...")
+    print("=" * 70)
+
+    # Validate environment variables
+    required_vars = [
+        ("AZURE_OPENAI_API_KEY", azure_openai_api_key),
+        ("AZURE_OPENAI_ENDPOINT", azure_openai_endpoint),
+        ("AZURE_OPENAI_DEPLOYMENT_NAME", azure_openai_deployment_name),
+        ("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME", azure_openai_embedding_deployment_name),
+        ("AZURE_COSMOSDB_ENDPOINT", cosmosdb_endpoint),
+        ("AZURE_COSMOSDB_DATABASE_NAME", cosmosdb_database_name),
+    ]
+    
+    missing_vars = [name for name, value in required_vars if not value]
+    if missing_vars:
+        print(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+        print("Please set these in your .env file or environment.")
+        return
+    
+    print("✅ Environment variables validated")
+
+    try:
+        # Initialize Azure OpenAI services
+        print("\n📝 Initializing Azure OpenAI services...")
+        
+        embedder = AzureOpenAIEmbeddings(
+            azure_deployment=azure_openai_embedding_deployment_name,
+            openai_api_version=azure_openai_api_version,
+            azure_endpoint=azure_openai_endpoint,
+            api_key=azure_openai_api_key
+        )
+        print("✅ Embeddings service initialized")
+
+        llm = AzureChatOpenAI(
+            azure_deployment=azure_openai_deployment_name,
+            api_version=azure_openai_api_version,
+            azure_endpoint=azure_openai_endpoint,
+            api_key=azure_openai_api_key,
+            temperature=0.7,
+        )
+        print("✅ Chat service initialized")
+
+        # Initialize CosmosDB
+        print("\n🗃️  Initializing CosmosDB...")
+        credential = DefaultAzureCredential()
+        cosmos_client = CosmosClient(url=cosmosdb_endpoint, credential=credential)
+        print("✅ CosmosDB client initialized")
+
+        # Vector store configuration
+        vector_embedding_policy = {
+            "vectorEmbeddings": [
+                {
+                    "path": "/vectorContent", 
+                    "dataType": "float32", 
+                    "dimensions": EMBEDDING_DIMENSIONS, 
+                    "distanceFunction": "cosine"
+                },
+            ]
+        }
+
+        indexing_policy = {
+            "includedPaths": [{"path": "/*"}],
+            "excludedPaths": [{"path": '/"_etag"/?'}],
+            "vectorIndexes": [{"path": "/vectorContent", "type": "quantizedFlat"}],
+        }
+
+        print("\n🔍 Initializing enhanced vector store wrapper...")
+        vector_store = CosmosDBMem0Wrapper(
+            cosmos_client=cosmos_client,
+            database_name=cosmosdb_database_name,
+            container_name=cosmosdb_container_name,
+            embedding=embedder,
+            vector_embedding_policy=vector_embedding_policy,
+            indexing_policy=indexing_policy,
+            cosmos_container_properties={"partition_key": {"paths": ["/id"], "kind": "Hash"}},
+            cosmos_database_properties={},
+            vector_search_fields={
+                "text_field": "text",
+                "embedding_field": "vectorContent",
+                "metadata_field": "metadata",
+            }
+        )
+        print("✅ Enhanced vector store initialized with ID mapping")
+
+        # Debug: Show initial state
+        debug_print_all_documents(vector_store._container, label="initial state")
+
+        # Initialize Mem0
+        print("\n🧠 Initializing Mem0...")
+        config = {
+            "vector_store": {
+                "provider": "langchain",
+                "config": {"client": vector_store},
+            },
+            "llm": {
+                "provider": "langchain",
+                "config": {"model": llm},
+            },
+            "embedder": {
+                "provider": "langchain",
+                "config": {"model": embedder},
+            },
+        }
+
+        m = Memory.from_config(config)
+        print("✅ Mem0 initialized with enhanced vector store")
+
+    except Exception as init_error:
+        print(f"❌ Initialization failed: {init_error}")
+        print(traceback.format_exc())
+        return
+
+    # --- Chatbot Interactive Loop ---
+    parser = argparse.ArgumentParser(description="Enhanced Azure OpenAI + Mem0 Chatbot (CosmosDB)")
+    parser.add_argument('--user-name', type=str, default='default_user', help='Username for the chat session')
+    args = parser.parse_args()
+    user_id = args.user_name
+
+    print(f"\n🤖 Azure OpenAI + Mem0 Chatbot (Enhanced CosmosDB)")
+    print(f"👤 User: {user_id}")
+    print(f"📋 Available Commands (✅=Working, ❌=Issues):")
+    print(f"   /memories              - List all memories for current user (✅)")
+    print(f"   /search <term>         - Search memories by keyword (❌)")
+    print(f"   /update <mem0_id> <content> - Update a memory by Mem0 ID (❌)")
+    print(f"   /delete <mem0_id>      - Delete a memory by Mem0 ID (❌)")
+    print(f"   /history               - Show current session history (✅)")
+    print(f"   /clear_history         - Clear session history (✅)")
+    print(f"   /debug                 - Show debug information (✅)")
+    print(f"   /cleanup               - Clear stale mem0 metadata cache (✅)")
+    print(f"   exit                   - Quit the chatbot (✅)")
+    print("=" * 70)
+    
+    history = []
+
+    while True:
+        try:
+            user_input = input(f"\n{user_id}: ").strip()
+            
+            if user_input.lower() == "exit":
+                print("👋 Goodbye! Thanks for chatting!")
+                break
+                
+            # Handle special commands
+            if user_input.lower() == "/debug":
+                print(f"\n🔍 Debug Information:")
+                print(f"📊 ID Mappings: {len(vector_store._id_mapping)} entries")
+                print(f"📝 Session History: {len(history)} messages")
+                debug_print_all_documents(vector_store._container, label="debug command")
+                continue
+                
+            if user_input.lower() == "/cleanup":
+                print(f"\n🧹 Clearing stale mem0 metadata...")
+                try:
+                    # Clear the ID mapping cache
+                    vector_store._id_mapping.clear()
+                    vector_store._reverse_mapping.clear()
+                    print(f"✅ Cleared ID mapping cache")
+                    
+                    # Try to reinitialize mem0 to clear its internal cache
+                    print(f"🔄 Reinitializing mem0...")
+                    m = Memory.from_config(config)
+                    print(f"✅ Mem0 reinitialized successfully")
+                    
+                except Exception as e:
+                    print(f"❌ Error during cleanup: {e}")
+                continue
+                
+            if user_input.lower() == "/memories":
+                print(f"\n🧠 Retrieving memories for user: {user_id}")
+                try:
+                    memories = vector_store.get_all_memories(user_id=user_id)
+                    
+                    if not memories:
+                        print("💭 No memories found for this user.")
+                    else:
+                        print(f"📚 Found {len(memories)} memories:")
+                        print("-" * 50)
+                        for i, mem in enumerate(memories, 1):
+                            memory_content = mem.get('memory', 'N/A')
+                            memory_id = mem.get('id', 'N/A')
+                            cosmos_id = mem.get('metadata', {}).get('cosmos_id', 'N/A')
+                            created_at = mem.get('metadata', {}).get('created_at', 'N/A')
+                            
+                            print(f"{i}. 🆔 Mem0 ID: {memory_id}")
+                            print(f"   🗃️  Cosmos ID: {cosmos_id}")
+                            print(f"   💬 Content: {memory_content}")
+                            print(f"   📅 Created: {created_at}")
+                            print()
+                except Exception as e:
+                    print(f"❌ Error retrieving memories: {e}")
+                    print(traceback.format_exc())
+                continue
+                
+            if user_input.lower().startswith("/search "):
+                keyword = user_input[8:].strip()
+                if not keyword:
+                    print("❓ Usage: /search <keyword>")
+                    continue
+                    
+                print(f"🔍 Searching memories for: '{keyword}'")
+                try:
+                    result = safe_mem0_call(m.search, keyword, user_id=user_id, limit=10)
+                    
+                    # Handle different return formats
+                    if isinstance(result, dict):
+                        matches = result.get("results", [])
+                    elif isinstance(result, list):
+                        matches = result
+                    else:
+                        matches = []
+                    
+                    if not matches:
+                        print("🔍 No matching memories found.")
+                    else:
+                        print(f"📚 Found {len(matches)} matching memories:")
+                        print("-" * 50)
+                        for i, mem in enumerate(matches, 1):
+                            memory_content = mem.get('memory', 'N/A')
+                            memory_id = mem.get('id', 'N/A')
+                            score = mem.get('score', 'N/A')
+                            
+                            print(f"{i}. 🆔 ID: {memory_id}")
+                            print(f"   📊 Score: {score}")
+                            print(f"   💬 Content: {memory_content}")
+                            print()
+                except Exception as e:
+                    print(f"❌ Error searching memories: {e}")
+                    print(traceback.format_exc())
+                continue
+                
+            if user_input.lower().startswith("/update "):
+                parts = user_input.split(maxsplit=2)
+                if len(parts) < 3:
+                    print("❓ Usage: /update <memory_id> <new_content>")
+                    continue
+                    
+                memory_id, new_content = parts[1], parts[2]
+                print(f"✏️  Updating memory {memory_id}...")
+                
+                try:
+                    safe_mem0_call(m.update, memory_id, new_content)
+                    print(f"✅ Memory {memory_id} updated successfully.")
+                except Exception as e:
+                    print(f"❌ Error updating memory: {e}")
+                    print(traceback.format_exc())
+                continue
+                
+            if user_input.lower().startswith("/delete "):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) < 2:
+                    print("❓ Usage: /delete <memory_id>")
+                    continue
+                    
+                memory_id = parts[1]
+                print(f"🗑️  Deleting memory {memory_id}...")
+                
+                try:
+                    safe_mem0_call(m.delete, memory_id)
+                    print(f"✅ Memory {memory_id} deleted successfully.")
+                except Exception as e:
+                    print(f"❌ Error deleting memory: {e}")
+                    print(traceback.format_exc())
+                continue
+                
+            if user_input.lower() == "/history":
+                if not history:
+                    print("📝 No conversation history in this session.")
+                else:
+                    print(f"\n📜 Current session chat history ({len(history)} messages):")
+                    print("-" * 50)
+                    for i, msg in enumerate(history, 1):
+                        role_emoji = "👤" if msg['role'] == 'user' else "🤖"
+                        print(f"{i}. {role_emoji} {msg['role'].capitalize()}: {msg['content']}")
+                        print()
+                continue
+                
+            if user_input.lower() == "/clear_history":
+                confirm = input("🤔 Clear session history? (y/n): ").strip().lower()
+                if confirm == "y":
+                    history.clear()
+                    print("✅ Session chat history cleared.")
+                    
+                    clear_mem = input("🤔 Also clear all memories for this user? (y/n): ").strip().lower()
+                    if clear_mem == "y":
+                        try:
+                            print(f"🗑️  Clearing all memories for user: {user_id}")
+                            memories_list = vector_store.get_all_memories(user_id=user_id)
+                            deleted_count = 0
+                            
+                            for memory in memories_list:
+                                try:
+                                    memory_id = memory.get('id')
+                                    if memory_id:
+                                        safe_mem0_call(m.delete, memory_id)
+                                        deleted_count += 1
+                                except Exception as e:
+                                    print(f"⚠️  Error deleting memory {memory_id}: {e}")
+                            
+                            print(f"✅ Deleted {deleted_count} memories for user {user_id}.")
+                            
+                        except Exception as e:
+                            print(f"❌ Error clearing memories: {e}")
+                            print(traceback.format_exc())
+                else:
+                    print("❌ Clear history cancelled.")
+                continue
+                
+            # Handle regular conversation
+            print(f"\n🤖 Processing your message...")
+            response = handle_user_input(user_input, user_id, m, llm, history)
+            print(f"\n🤖 Bot: {response}")
+            
+        except KeyboardInterrupt:
+            print(f"\n\n👋 Goodbye! Chat session ended.")
+            break
+            
+        except Exception as e:
+            print(f"\n❌ An unexpected error occurred: {e}")
+            print("🔄 You can continue chatting or type 'exit' to quit.")
+            if input("Show detailed error? (y/n): ").strip().lower() == 'y':
+                print(traceback.format_exc())
+
+
+if __name__ == "__main__":
+    main()
